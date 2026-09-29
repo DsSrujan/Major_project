@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <rect width="100" height="100" fill="#000000" rx="20"/>
+  
+  <!-- Central Stem Line -->
+  <path d="M 50 42 L 50 80" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round"/>
+  
+  <!-- Top Leaf -->
+  <path d="M 50 40 C 41 40 41 28 50 18 C 59 28 59 40 50 40 Z" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
+  
+  <!-- Middle Left Leaf -->
+  <path d="M 46 51 C 37 51 32 44 32 35 C 41 35 46 42 46 51 Z" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
+  
+  <!-- Middle Right Leaf -->
+  <path d="M 54 51 C 63 51 68 44 68 35 C 59 35 54 42 54 51 Z" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
+  
+  <!-- Bottom Left Leaf -->
+  <path d="M 46 67 C 37 67 32 60 32 51 C 41 51 46 58 46 67 Z" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
+  
+  <!-- Bottom Right Leaf -->
+  <path d="M 54 67 C 63 67 68 60 68 51 C 59 51 54 58 54 67 Z" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>
