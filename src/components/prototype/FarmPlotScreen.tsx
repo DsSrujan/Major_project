@@ -1,17 +1,16 @@
 import { useTranslation } from "../../translation/useTranslation";
 import React, { useState, useEffect, useRef } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { 
   Globe, RefreshCw, MapPin, Layers, Sparkles, Activity, 
-  Plus, Download, X, CheckCircle2, ChevronRight, Wind, Sun, 
+  Plus, Download, CheckCircle2, Wind, Sun, 
   Thermometer, Droplets, FileText, Cpu, FlaskConical, Maximize2
 } from "lucide-react";
 import { usePlots, type Plot, getStatusColor, getStatusDotColor } from "../../data/plots";
-import LeafletMapPicker, { type BoundaryData } from "./LeafletMapPicker";
-import GoogleMapBoundarySurveyor from "./GoogleMapBoundarySurveyor";
+import GoogleMapBoundarySurveyor, { type BoundaryData } from "./GoogleMapBoundarySurveyor";
 import { FarmPlotOverviewMap, type BasemapMode, type DataOverlayLayer } from "./FarmPlotOverviewMap";
 import { reverseGeocode, getElevation, parseGeoJSONFile, type GeoJSONPolygon } from "../../lib/geo";
-import { boundaryToSvgPath, generatePlaceholderSvgPath } from "../../lib/svgPath";
+import { boundaryToSvgPath } from "../../lib/svgPath";
 import { useEnvironmentalData } from "../../hooks/useEnvironmentalData";
 
 
@@ -79,37 +78,7 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
   // Selected plot state
 
   const [selectedPlotId, setSelectedPlotId] = useState("plot-1");
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [addStep, setAddStep] = useState(1);
-
-  // New Plot form data
-  const [newPlotData, setNewPlotData] = useState({
-    name: "",
-    farmer: "Swaminathan Gowda",
-    area: "",
-    crop: "Oil Palm",
-    coordinates: "17.3912 N, 78.4948 E",
-    soilType: "Loamy",
-    irrigation: "Precision Drip",
-    // Phase 5 additions
-    plantingDate: "",  // optional — ISO date string
-    plantCount: "",    // optional — number of plants
-  });
-
-  // Phase 2 wizard state — real boundary + geocoding
-  const [wizardBoundary, setWizardBoundary] = useState<BoundaryData | null>(null);
-  const [wizardAreaUnit, setWizardAreaUnit] = useState<"acres" | "hectares">("acres");
-  const [isGeocodingStep3, setIsGeocodingStep3] = useState(false);
-  const [step3Data, setStep3Data] = useState<{
-    areaAcres: number;
-    village: string;
-    taluk: string;     // Phase 4 addition
-    district: string;
-    state: string;     // Phase 4 addition
-    country: string;   // Phase 4 addition
-    elevation: number;
-    geocodeOk: boolean;
-  } | null>(null);
+  const [isCreatePlotOpen, setIsCreatePlotOpen] = useState(false);
   const [importedGeoJSON, setImportedGeoJSON] = useState<GeoJSONPolygon | undefined>(undefined);
   const geoJSONFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -138,6 +107,118 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
     }
   };
 
+  const handleCreatePlotConfirm = async (data: BoundaryData) => {
+    const meta = data.metadata || {
+      name: "New Farm Plot",
+      farmer: "Swaminathan Gowda",
+      crop: "Oil Palm",
+      soilType: "Loamy",
+      irrigation: "Precision Drip",
+      plantingDate: "",
+      plantCount: "",
+    };
+
+    const areaAcres = Number(data.areaAcres.toFixed(2));
+    const ring = data.geoJSON.coordinates[0] as number[][];
+    const coordStrings = ring.map(
+      ([lng, lat]) => `${Math.abs(lat).toFixed(4)} ${lat >= 0 ? "N" : "S"}, ${Math.abs(lng).toFixed(4)} ${lng >= 0 ? "E" : "W"}`
+    );
+
+    let village = "";
+    let taluk = "";
+    let district = "";
+    let state = "";
+    let country = "";
+    let elevation = 0;
+
+    if (data.centroid) {
+      const { lat, lng } = data.centroid;
+      try {
+        const [geoResult, elevResult] = await Promise.allSettled([
+          reverseGeocode(lat, lng),
+          getElevation(lat, lng),
+        ]);
+        if (geoResult.status === "fulfilled") {
+          village = geoResult.value.village;
+          taluk = geoResult.value.taluk;
+          district = geoResult.value.district;
+          state = geoResult.value.state;
+          country = geoResult.value.country;
+        }
+        if (elevResult.status === "fulfilled") {
+          elevation = elevResult.value;
+        }
+      } catch {
+        // ignore background geocode errors
+      }
+    }
+
+    let plantationAge = 0;
+    if (meta.plantingDate) {
+      const msPerYear = 365.25 * 24 * 3600 * 1000;
+      plantationAge = Math.max(0, Math.round((Date.now() - new Date(meta.plantingDate).getTime()) / msPerYear));
+    }
+
+    const status: Plot["status"] = "Healthy";
+    const newPlot = await storAddPlot({
+      name: meta.name || "New Farm Plot",
+      farmer: meta.farmer || "Swaminathan Gowda",
+      crop: meta.crop || "Oil Palm",
+      stage: "Seedling",
+      age: plantationAge,
+      plantingDate: meta.plantingDate || undefined,
+      plantCount: meta.plantCount ? parseInt(meta.plantCount, 10) : undefined,
+      area: areaAcres,
+      elevation: elevation || undefined,
+      village: village || undefined,
+      taluk: taluk || undefined,
+      district: district || undefined,
+      state: state || undefined,
+      country: country || undefined,
+      coordinates: coordStrings,
+      geoJSON: data.geoJSON,
+      soil: meta.soilType || "Loamy",
+      irrigation: meta.irrigation || "Precision Drip",
+      status,
+      statusColor: getStatusColor(status),
+      statusDotColor: getStatusDotColor(status),
+      svgPath: boundaryToSvgPath(data.geoJSON),
+      fillGradient: "url(#healthyGrad)",
+      strokeColor: "#10b981",
+      glowColor: "rgba(16, 185, 129, 0.4)",
+      boundaryMapped: true,
+      soilReportAttached: false,
+    });
+
+    if (newPlot?.id) {
+      setSelectedPlotId(newPlot.id);
+    }
+    if (showToast) {
+      showToast(`Farm Plot "${meta.name}" (${areaAcres} acres) created successfully!`, "success");
+    }
+    if (onPlotCreated) onPlotCreated();
+    setIsCreatePlotOpen(false);
+  };
+
+  // GeoJSON file import handler
+  const handleGeoJSONImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const result = parseGeoJSONFile(ev.target?.result as string);
+        setImportedGeoJSON(result.geoJSON);
+        setIsCreatePlotOpen(true);
+        triggerToast("GeoJSON boundary loaded into workspace.", "success");
+      } catch (err) {
+        triggerToast(`Invalid GeoJSON: ${(err as Error).message}`, "warning");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
   // Dynamic KPI calculations
   const totalArea = plots.reduce((sum, plot) => sum + (plot.area || 0), 0);
   const healthyPlotsCount = plots.filter(plot => plot.status === "Healthy" || plot.statusDotColor === "bg-emerald-500").length;
@@ -152,7 +233,6 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
   const uniqueCrops = new Set(plots.map(p => p.crop).filter(Boolean));
   const activeCropTypes = uniqueCrops.size;
 
-
   const triggerToast = (msg: string, type: "success" | "info" | "warning" = "success") => {
     if (showToast) {
       showToast(msg, type);
@@ -161,11 +241,8 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
     }
   };
 
-  // Register triggerToast with the plots store so store-level errors (fetch/insert failures)
-  // surface as toasts rather than staying silent in the console.
   React.useEffect(() => {
     import("../../data/plots").then(({ registerToastFn }) => registerToastFn(triggerToast));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const triggerScan = () => {
@@ -183,137 +260,6 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
       setIsLoading(false);
       triggerToast("GIS satellite imagery layers refreshed.", "success");
     }, 800);
-  };
-
-  const handleAddPlotSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newPlotData.name) {
-      triggerToast("Validation Failed: Please fill Plot Name.", "warning");
-      return;
-    }
-    if (!wizardBoundary && !newPlotData.area) {
-      triggerToast("Validation Failed: Please draw a boundary or enter an area.", "warning");
-      return;
-    }
-
-    const areaAcres = wizardBoundary
-      ? wizardBoundary.areaAcres
-      : parseFloat(newPlotData.area as string) || 0;
-
-    // Kick off geocoding + elevation while going to step 3
-    setAddStep(3);
-    setIsGeocodingStep3(true);
-
-    let village = "";
-    let taluk = "";
-    let district = "";
-    let state = "";
-    let country = "";
-    let elevation = 0;
-    let geocodeOk = true;
-
-    if (wizardBoundary?.centroid) {
-      const { lat, lng } = wizardBoundary.centroid;
-      try {
-        const [geoResult, elevResult] = await Promise.allSettled([
-          reverseGeocode(lat, lng),
-          getElevation(lat, lng),
-        ]);
-        if (geoResult.status === "fulfilled") {
-          village = geoResult.value.village;
-          taluk = geoResult.value.taluk;         // Phase 4 addition
-          district = geoResult.value.district;
-          state = geoResult.value.state;         // Phase 4 addition
-          country = geoResult.value.country;     // Phase 4 addition
-        } else {
-          geocodeOk = false;
-        }
-        if (elevResult.status === "fulfilled") {
-          elevation = elevResult.value;
-        }
-      } catch {
-        geocodeOk = false;
-      }
-    }
-
-    if (!geocodeOk) {
-      triggerToast("Location data unavailable — plot saved with blank fields, editable later.", "info");
-    }
-
-    setStep3Data({ areaAcres, village, taluk, district, state, country, elevation, geocodeOk });
-    setIsGeocodingStep3(false);
-
-    // Persist to shared store
-    const status: Plot["status"] = "Healthy";
-    const coordStrings = wizardBoundary
-      ? (wizardBoundary.geoJSON.coordinates[0] as number[][]).map(
-          ([lng, lat]) => `${Math.abs(lat).toFixed(4)} ${lat >= 0 ? "N" : "S"}, ${Math.abs(lng).toFixed(4)} ${lng >= 0 ? "E" : "W"}`
-        )
-      : [newPlotData.coordinates];
-
-    // Derive plantation_age from plantingDate (Phase 5)
-    let plantationAge = 0;
-    if (newPlotData.plantingDate) {
-      const msPerYear = 365.25 * 24 * 3600 * 1000;
-      plantationAge = Math.max(0, Math.round((Date.now() - new Date(newPlotData.plantingDate).getTime()) / msPerYear));
-    }
-
-    await storAddPlot({
-      name: newPlotData.name,
-      farmer: newPlotData.farmer,
-      crop: newPlotData.crop,
-      stage: "Seedling",
-      age: plantationAge,
-      plantingDate: newPlotData.plantingDate || undefined,
-      plantCount: newPlotData.plantCount ? parseInt(newPlotData.plantCount, 10) : undefined,
-      area: areaAcres,
-      elevation: elevation || undefined,
-      village: village || undefined,
-      taluk: taluk || undefined,
-      district: district || undefined,
-      state: state || undefined,
-      country: country || undefined,
-      coordinates: coordStrings,
-      geoJSON: wizardBoundary?.geoJSON,
-      soil: newPlotData.soilType,
-      irrigation: newPlotData.irrigation,
-      status,
-      statusColor: getStatusColor(status),
-      statusDotColor: getStatusDotColor(status),
-      svgPath: wizardBoundary?.geoJSON ? boundaryToSvgPath(wizardBoundary.geoJSON) : generatePlaceholderSvgPath(areaAcres),
-      fillGradient: "url(#healthyGrad)",
-      strokeColor: "#10b981",
-      glowColor: "rgba(16, 185, 129, 0.4)",
-      boundaryMapped: !!wizardBoundary,
-      soilReportAttached: false,
-    });
-
-    if (onPlotCreated) onPlotCreated();
-  };
-
-  // GeoJSON file import handler
-  const handleGeoJSONImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      try {
-        const result = parseGeoJSONFile(ev.target?.result as string);
-        setImportedGeoJSON(result.geoJSON);
-        if (result.name && !newPlotData.name) {
-          setNewPlotData(prev => ({ ...prev, name: result.name! }));
-        }
-        // Open wizard at step 2 with the imported boundary
-        setAddStep(2);
-        setIsAddModalOpen(true);
-        triggerToast("GeoJSON boundary loaded — review in the map before confirming.", "success");
-      } catch (err) {
-        triggerToast(`Invalid GeoJSON: ${(err as Error).message}`, "warning");
-      }
-    };
-    reader.readAsText(file);
-    // reset so same file can be re-imported
-    e.target.value = "";
   };
 
   return (
@@ -341,29 +287,14 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
         <div className="flex items-center gap-3 w-full md:w-auto">
           <button
             onClick={() => {
-              setAddStep(1);
-              setWizardBoundary(null);
               setImportedGeoJSON(undefined);
-              setStep3Data(null);
-              setNewPlotData({
-                name: "",
-                farmer: "Swaminathan Gowda",
-                area: "",
-                crop: "Oil Palm",
-                coordinates: "17.3912° N, 78.4948° E",
-                soilType: "Loamy",
-                irrigation: "Precision Drip",
-                plantingDate: "",
-                plantCount: "",
-              });
-              setIsAddModalOpen(true);
+              setIsCreatePlotOpen(true);
             }}
             className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-primary hover:bg-[#235F26] text-white font-extrabold rounded-xl shadow-md shadow-primary/10 hover:shadow-primary/20 active:scale-95 transition-all text-xs cursor-pointer border-0"
           >
             <Plus className="w-4 h-4" />
-            
-                                  {t('farmplotscreen.add_plot')}
-                                </button>
+            {t('farmplotscreen.add_plot')}
+          </button>
           
           {/* Hidden GeoJSON file input */}
           <input
@@ -508,19 +439,14 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
           </div>
           <button
             onClick={() => {
-              setAddStep(1);
-              setWizardBoundary(null);
               setImportedGeoJSON(undefined);
-              setStep3Data(null);
-              setNewPlotData({ name: "", farmer: "Swaminathan Gowda", area: "", crop: "Oil Palm", coordinates: "17.3912 N, 78.4948 E", soilType: "Loamy", irrigation: "Precision Drip", plantingDate: "", plantCount: "" });
-              setIsAddModalOpen(true);
+              setIsCreatePlotOpen(true);
             }}
             className="inline-flex items-center gap-2 px-5 py-3 bg-primary hover:bg-[#235F26] text-white font-extrabold rounded-xl shadow-md text-xs border-0 cursor-pointer transition-all"
           >
             <Plus className="w-4 h-4" />
-            
-                                  {t('farmplotscreen.add_your_first_plot')}
-                                </button>
+            {t('farmplotscreen.add_your_first_plot')}
+          </button>
         </div>
       )}
 
@@ -1042,362 +968,15 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
 
       </div>}
 
-      {/* ================= 12. Add Plot Multi-step Modal ================= */}
-      <AnimatePresence>
-        {isAddModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden">
-            {/* Backdrop overlay */}
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 0.5 }}
-              exit={{ opacity: 0 }}
-              className="absolute inset-0 bg-black pointer-events-auto"
-              onClick={() => setIsAddModalOpen(false)}
-            />
-
-            {/* Modal Box */}
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 15 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              className="bg-white rounded-[32px] border-2 border-gray-200 shadow-2xl p-6 md:p-8 max-w-lg w-full relative z-10 text-left overflow-y-auto max-h-[90vh]"
-            >
-              {/* Close Button */}
-              <button
-                onClick={() => setIsAddModalOpen(false)}
-                className="absolute top-6 right-6 p-1.5 text-gray-400 hover:text-gray-600 rounded-full hover:bg-gray-100 transition-colors border-0 cursor-pointer bg-transparent"
-              >
-                <X className="w-5 h-5" />
-              </button>
-
-              {/* Progress headers */}
-              <div className="flex items-center gap-3.5 mb-6 pb-4 border-b border-gray-100">
-                <span className="text-[10px] font-black text-primary bg-emerald-50 px-2.5 py-1 rounded-full uppercase">
-                  
-                                                    {t('farmplotscreen.gis_wizard_step')} {addStep}  {t('farmplotscreen.of_3')}
-                                                  </span>
-                <span className="text-xs font-bold text-gray-400">
-                  {addStep === 1 ? "Plot Info" : addStep === 2 ? "Location Specs" : "Success"}
-                </span>
-              </div>
-
-              {/* Success View */}
-              {addStep === 3 ? (
-                <div className="text-center py-6 space-y-5">
-                  <div className="w-16 h-16 bg-emerald-50 text-primary rounded-full flex items-center justify-center mx-auto shadow-xs border border-emerald-100/50">
-                    {isGeocodingStep3 ? (
-                      <RefreshCw className="w-8 h-8 animate-spin text-primary" />
-                    ) : (
-                      <CheckCircle2 className="w-9 h-9" />
-                    )}
-                  </div>
-                  <div className="space-y-1.5 max-w-sm mx-auto">
-                    <h3 className="text-lg font-black text-gray-900">{t('farmplotscreen.gis_boundary_registered_successfully')}</h3>
-                    {isGeocodingStep3 ? (
-                      <p className="text-xs text-gray-500">{t('farmplotscreen.fetching_location_data_and_elevation_hel')}</p>
-                    ) : step3Data ? (
-                      <div className="text-left space-y-2 mt-3">
-                        <div className="grid grid-cols-2 gap-2 text-xs">
-                          <div className="bg-gray-50 border border-gray-150 p-2.5 rounded-xl">
-                            <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider">{t('farmplotscreen.computed_area')}</p>
-                            <p className="font-black text-gray-900 mt-0.5">
-                              {step3Data.areaAcres.toFixed(2)}  {t('farmplotscreen.ac_1')}
-                                                                                            {" "}
-                              <span className="text-gray-400 font-semibold text-[9px]">
-                                ({(step3Data.areaAcres * 0.404686).toFixed(2)}  {t('farmplotscreen.ha')}
-                                                                                                </span>
-                            </p>
-                          </div>
-                          <div className="bg-gray-50 border border-gray-150 p-2.5 rounded-xl">
-                            <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider">{t('farmplotscreen.elevation')}</p>
-                            <p className="font-black text-gray-900 mt-0.5">
-                              {step3Data.elevation ? `${step3Data.elevation} m MSL` : "–"}
-                            </p>
-                          </div>
-                        </div>
-                        {/* Location row: village / taluk / district / state / country */}
-                        <div className="grid grid-cols-3 gap-2 text-xs">
-                          <div className="bg-gray-50 border border-gray-150 p-2.5 rounded-xl">
-                            <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider">{t('farmplotscreen.village')}</p>
-                            <p className="font-black text-gray-900 mt-0.5">{step3Data.village || "–"}</p>
-                          </div>
-                          <div className="bg-gray-50 border border-gray-150 p-2.5 rounded-xl">
-                            <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider">{t('farmplotscreen.taluk')}</p>
-                            <p className="font-black text-gray-900 mt-0.5">{step3Data.taluk || "–"}</p>
-                          </div>
-                          <div className="bg-gray-50 border border-gray-150 p-2.5 rounded-xl">
-                            <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider">{t('farmplotscreen.district')}</p>
-                            <p className="font-black text-gray-900 mt-0.5">{step3Data.district || "–"}</p>
-                          </div>
-                          <div className="bg-gray-50 border border-gray-150 p-2.5 rounded-xl">
-                            <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider">{t('farmplotscreen.state')}</p>
-                            <p className="font-black text-gray-900 mt-0.5">{step3Data.state || "–"}</p>
-                          </div>
-                          <div className="bg-gray-50 border border-gray-150 p-2.5 col-span-2 rounded-xl">
-                            <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider">{t('farmplotscreen.country')}</p>
-                            <p className="font-black text-gray-900 mt-0.5">{step3Data.country || "–"}</p>
-                          </div>
-                        </div>
-                        {!step3Data.geocodeOk && (
-                          <p className="text-[10px] text-amber-600 font-semibold">
-                            
-                                                                                      {t('farmplotscreen.location_data_unavailable_editable_after')}
-                                                                                    </p>
-                        )}
-                        <p className="text-xs text-gray-500 leading-relaxed">
-                          
-                                                                                {t('farmplotscreen.boundary_mapped_digital_twin_telemetry_w')}
-                                                                              </p>
-                      </div>
-                    ) : (
-                      <p className="text-xs text-gray-500">
-                        
-                                                                              {t('farmplotscreen.plot_saved_digital_twin_telemetry_will_p')}
-                                                                            </p>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => setIsAddModalOpen(false)}
-                    disabled={isGeocodingStep3}
-                    className="w-full bg-primary hover:bg-[#235F26] disabled:opacity-50 text-white font-extrabold py-3.5 rounded-xl shadow-md transition-all text-xs border-0 cursor-pointer"
-                  >
-                    
-                                                          {t('farmplotscreen.done')}
-                                                        </button>
-                </div>
-              ) : (
-                <form onSubmit={handleAddPlotSubmit} className="space-y-5">
-                  
-                  {/* Step 1: Plot Details */}
-                  {addStep === 1 && (
-                    <div className="space-y-4">
-                      <div className="space-y-1 bg-gray-50 p-3 rounded-2xl border border-gray-150 mb-2">
-                        <h4 className="text-xs font-extrabold text-gray-800">{t('farmplotscreen.plot_details')}</h4>
-                        <p className="text-[11px] text-gray-450">{t('farmplotscreen.please_set_plot_identification_fields')}</p>
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{t('farmplotscreen.plot_name')}</label>
-                        <input
-                          required
-                          type="text"
-                          value={newPlotData.name}
-                          onChange={(e) => setNewPlotData(prev => ({ ...prev, name: e.target.value }))}
-                          placeholder={t('farmplotscreen.e_g_swamy_north_plot_plot_2a')}
-                          className="w-full px-3.5 py-2.5 rounded-xl border border-gray-250 text-xs focus:ring-2 focus:ring-primary/10 focus:border-primary font-semibold"
-                        />
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{t('farmplotscreen.farmer_landholder')}</label>
-                        <input
-                          type="text"
-                          required
-                          list="farmer-options"
-                          value={newPlotData.farmer}
-                          onChange={(e) => setNewPlotData(prev => ({ ...prev, farmer: e.target.value }))}
-                          placeholder={t('farmplotscreen.e_g_swaminathan_gowda')}
-                          className="w-full px-3 py-2.5 rounded-xl border border-gray-250 bg-white text-xs font-semibold focus:border-primary"
-                        />
-                        <datalist id="farmer-options">
-                          <option value="Swaminathan Gowda" />
-                          <option value="K. Ramachandra Rao" />
-                          <option value="M. Devamma" />
-                          <option value="Rajesh Kumar" />
-                        </datalist>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{t('farmplotscreen.estimated_acreage_optional_recalculated_')}</label>
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={newPlotData.area}
-                            onChange={(e) => setNewPlotData(prev => ({ ...prev, area: e.target.value }))}
-                            placeholder={t('farmplotscreen.e_g_12_5')}
-                            className="w-full bg-gray-50 border border-gray-250 text-gray-900 text-xs rounded-xl focus:ring-primary focus:border-primary block p-3 transition-colors shadow-xs"
-                          />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{t('farmplotscreen.primary_crop')}</label>
-                          <input
-                            type="text"
-                            list="crop-options"
-                            value={newPlotData.crop}
-                            onChange={(e) => setNewPlotData(prev => ({ ...prev, crop: e.target.value }))}
-                            placeholder={t('farmplotscreen.e_g_oil_palm')}
-                            className="w-full px-3 py-2.5 rounded-xl border border-gray-250 bg-white text-xs font-semibold focus:border-primary"
-                          />
-                          <datalist id="crop-options">
-                            <option value="Oil Palm" />
-                            <option value="Coconut Palm" />
-                            <option value="Cocoa" />
-                          </datalist>
-                        </div>
-                      </div>
-
-                      {/* Phase 5: Planting date + plant count (optional) */}
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{t('farmplotscreen.planting_date')} <span className="font-normal normal-case text-gray-400">{t('farmplotscreen.optional')}</span></label>
-                          <input
-                            type="date"
-                            value={newPlotData.plantingDate}
-                            onChange={(e) => setNewPlotData(prev => ({ ...prev, plantingDate: e.target.value }))}
-                            className="w-full bg-gray-50 border border-gray-250 text-gray-900 text-xs rounded-xl focus:ring-primary focus:border-primary block p-3 transition-colors shadow-xs"
-                          />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{t('farmplotscreen.no_of_plants')} <span className="font-normal normal-case text-gray-400">{t('farmplotscreen.optional')}</span></label>
-                          <input
-                            type="number"
-                            min="1"
-                            step="1"
-                            value={newPlotData.plantCount}
-                            onChange={(e) => setNewPlotData(prev => ({ ...prev, plantCount: e.target.value }))}
-                            placeholder={t('farmplotscreen.e_g_240')}
-                            className="w-full bg-gray-50 border border-gray-250 text-gray-900 text-xs rounded-xl focus:ring-primary focus:border-primary block p-3 transition-colors shadow-xs"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Step 2: Location specs — real map picker */}
-                  {addStep === 2 && (
-                    <div className="space-y-4">
-                      <div className="space-y-1 bg-gray-50 p-3 rounded-2xl border border-gray-150 mb-2">
-                        <h4 className="text-xs font-extrabold text-gray-800">{t('farmplotscreen.draw_boundary_on_map')}</h4>
-                        <p className="text-[11px] text-gray-450">{t('farmplotscreen.use_the_polygon_tool_to_trace_your_plot_')}</p>
-                      </div>
-
-                      {/* Area unit toggle */}
-                      <div className="flex items-center justify-between">
-                        <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{t('farmplotscreen.area_unit')}</label>
-                        <div className="inline-flex bg-gray-50 border border-gray-200 rounded-xl p-0.5">
-                          {(["acres", "hectares"] as const).map((u) => (
-                            <button
-                              key={u}
-                              type="button"
-                              onClick={() => setWizardAreaUnit(u)}
-                              className={`px-3 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
-                                wizardAreaUnit === u ? "bg-white text-primary shadow-xs" : "text-gray-500"
-                              }`}
-                            >
-                              {u}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Real Leaflet map & Full-Screen Satellite Survey launcher */}
-                      <LeafletMapPicker
-                        onBoundaryChange={(data) => {
-                          setWizardBoundary(data);
-                          if (data) {
-                            const areaDisplay = wizardAreaUnit === "hectares"
-                              ? `${(data.areaAcres * 0.404686).toFixed(2)}`
-                              : `${data.areaAcres.toFixed(2)}`;
-                            setNewPlotData(prev => ({ ...prev, area: areaDisplay }));
-                          }
-                        }}
-                        initialGeoJSON={importedGeoJSON}
-                        areaUnit={wizardAreaUnit}
-                        showToast={showToast}
-                        plotName={newPlotData.name || "New Farm Plot"}
-                      />
-
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{t('farmplotscreen.irrigation_method')}</label>
-                          <select
-                            value={newPlotData.irrigation}
-                            onChange={(e) => setNewPlotData(prev => ({ ...prev, irrigation: e.target.value }))}
-                            className="w-full px-3 py-2.5 rounded-xl border border-gray-250 bg-white text-xs font-semibold focus:border-primary"
-                          >
-                            <option>{t('farmplotscreen.precision_drip_1')}</option>
-                            <option>{t('farmplotscreen.manual_drip_1')}</option>
-                            <option>{t('farmplotscreen.sprinkler')}</option>
-                          </select>
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{t('farmplotscreen.soil_classification')}</label>
-                          <select
-                            value={newPlotData.soilType}
-                            onChange={(e) => setNewPlotData(prev => ({ ...prev, soilType: e.target.value }))}
-                            className="w-full px-3 py-2.5 rounded-xl border border-gray-250 bg-white text-xs font-semibold focus:border-primary"
-                          >
-                            <option>{t('farmplotscreen.loamy')}</option>
-                            <option>{t('farmplotscreen.clay')}</option>
-                            <option>{t('farmplotscreen.sandy')}</option>
-                          </select>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Navigation Action Footer inside modal */}
-                  <div className="flex justify-between items-center pt-4 border-t border-gray-150 mt-6">
-                    {addStep === 1 ? (
-                      <button
-                        type="button"
-                        onClick={() => setIsAddModalOpen(false)}
-                        className="px-4 py-2 text-xs font-bold text-gray-500 hover:text-gray-700 bg-transparent border-0 cursor-pointer"
-                      >
-                        
-                                                                          {t('farmplotscreen.cancel')}
-                                                                        </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setAddStep(1)}
-                        className="px-4 py-2 text-xs font-bold text-gray-500 hover:text-gray-700 flex items-center gap-1.5 bg-transparent border-0 cursor-pointer"
-                      >
-                        
-                                                                              {t('farmplotscreen.back')}
-                                                                            </button>
-                    )}
-
-                    {addStep === 1 ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (newPlotData.name) {
-                            setAddStep(2);
-                          } else {
-                            triggerToast("Validation Failed: Please fill Plot Name.", "warning");
-                          }
-                        }}
-                        className="px-5 py-2.5 bg-primary hover:bg-[#235F26] text-white font-extrabold text-xs rounded-xl flex items-center gap-1 border-0 cursor-pointer shadow-sm"
-                      >
-                        
-                                                                          {t('farmplotscreen.next_location')}
-                                                                          <ChevronRight className="w-3.5 h-3.5" />
-                      </button>
-                    ) : (
-                      <button
-                        type="submit"
-                        disabled={!wizardBoundary}
-                        className={`px-5 py-2.5 font-extrabold text-xs rounded-xl flex items-center gap-1 border-0 shadow-sm transition-all ${
-                          !wizardBoundary
-                            ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                            : "bg-primary hover:bg-[#235F26] text-white cursor-pointer animate-pulse"
-                        }`}
-                      >
-                        
-                                                                              {t('farmplotscreen.create_plot')}
-                                                                            </button>
-                    )}
-                  </div>
-
-                </form>
-              )}
-
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      {/* Full-Screen Google Maps Plot Creation Workspace */}
+      <GoogleMapBoundarySurveyor
+        isOpen={isCreatePlotOpen}
+        onClose={() => setIsCreatePlotOpen(false)}
+        onConfirm={handleCreatePlotConfirm}
+        initialGeoJSON={importedGeoJSON}
+        mode="create"
+        showToast={showToast}
+      />
 
       {/* Full-Screen Google Maps Boundary Surveyor for selected plot */}
       <GoogleMapBoundarySurveyor
@@ -1406,7 +985,7 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
         onConfirm={handleDirectSurveyConfirm}
         initialGeoJSON={selectedPlot?.geoJSON}
         plotName={selectedPlot?.name || "Farm Plot Boundary"}
-        defaultAreaUnit={wizardAreaUnit}
+        mode="survey_only"
         showToast={showToast}
       />
 
