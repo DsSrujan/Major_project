@@ -97,13 +97,33 @@ export interface GoogleMapBoundarySurveyorProps {
 const DEFAULT_CENTER = { lat: 17.3912, lng: 78.4948 }; // Andhra Pradesh / Telangana Oil Palm Belt
 const DEFAULT_FARM_ZOOM = 18;
 
+interface QuickLocation {
+  name: string;
+  state: string;
+  lat: number;
+  lng: number;
+}
+
 // Popular agricultural presets for one-tap locating
-const QUICK_LOCATIONS = [
-  { name: "Khammam", lat: 17.2473, lng: 80.1514 },
-  { name: "Eluru", lat: 16.7107, lng: 81.0952 },
-  { name: "Pedavegi", lat: 16.8083, lng: 81.1274 },
-  { name: "Chintalapudi", lat: 17.0673, lng: 80.9983 },
-  { name: "Kothagudem", lat: 17.5521, lng: 80.6186 },
+const QUICK_LOCATIONS: QuickLocation[] = [
+  { name: "Khammam", state: "Telangana", lat: 17.2473, lng: 80.1514 },
+  { name: "Eluru", state: "Andhra Pradesh", lat: 16.7107, lng: 81.0952 },
+  { name: "Pedavegi", state: "Andhra Pradesh", lat: 16.8083, lng: 81.1274 },
+  { name: "Chintalapudi", state: "Andhra Pradesh", lat: 17.0673, lng: 80.9983 },
+  { name: "Kothagudem", state: "Telangana", lat: 17.5521, lng: 80.6186 },
+  { name: "Jangareddygudem", state: "Andhra Pradesh", lat: 17.1265, lng: 81.2917 },
+  { name: "Rajahmundry", state: "Andhra Pradesh", lat: 17.0005, lng: 81.8040 },
+  { name: "Vijayawada", state: "Andhra Pradesh", lat: 16.5062, lng: 80.6480 },
+  { name: "Guntur", state: "Andhra Pradesh", lat: 16.3067, lng: 80.4365 },
+  { name: "Warangal", state: "Telangana", lat: 17.9689, lng: 79.5941 },
+  { name: "Nalgonda", state: "Telangana", lat: 17.0575, lng: 79.2684 },
+  { name: "Shimoga", state: "Karnataka", lat: 13.9299, lng: 75.5681 },
+  { name: "Bhadravathi", state: "Karnataka", lat: 13.8427, lng: 75.7032 },
+  { name: "Davanagere", state: "Karnataka", lat: 14.4644, lng: 75.9218 },
+  { name: "Udupi", state: "Karnataka", lat: 13.3409, lng: 74.7421 },
+  { name: "Mysore", state: "Karnataka", lat: 12.2958, lng: 76.6394 },
+  { name: "Hyderabad", state: "Telangana", lat: 17.3850, lng: 78.4867 },
+  { name: "Bengaluru", state: "Karnataka", lat: 12.9716, lng: 77.5946 },
 ];
 
 interface SearchSuggestion {
@@ -158,6 +178,9 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   const leafletAccuracyCircleRef = useRef<L.Circle | null>(null);
   const leafletUserMarkerRef = useRef<L.CircleMarker | L.Marker | null>(null);
   const leafletSearchMarkerRef = useRef<L.Marker | null>(null);
+  const leafletSatLayerRef = useRef<L.TileLayer | null>(null);
+  const leafletRoadLayerRef = useRef<L.TileLayer | null>(null);
+  const searchDebounceRef = useRef<any>(null);
 
   // Drawing & Plot Creation State
   const [isDrawingActive, setIsDrawingActive] = useState(true);
@@ -427,12 +450,26 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         doubleClickZoom: false,
       });
 
-      // High-resolution satellite tiles (Esri World Imagery)
+      // 1. High-resolution satellite tiles (Esri World Imagery)
       const satLayer = L.tileLayer(
         "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        { maxZoom: 19 }
+        { maxZoom: 19, attribution: "© Esri, Maxar, Earthstar" }
       );
-      satLayer.addTo(map);
+      leafletSatLayerRef.current = satLayer;
+
+      // 2. OpenStreetMap Standard / Road tiles
+      const roadLayer = L.tileLayer(
+        "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        { maxZoom: 19, attribution: "© OpenStreetMap contributors" }
+      );
+      leafletRoadLayerRef.current = roadLayer;
+
+      // Add appropriate active basemap layer
+      if (mapType === "roadmap") {
+        roadLayer.addTo(map);
+      } else {
+        satLayer.addTo(map);
+      }
 
       const markersGroup = L.layerGroup().addTo(map);
       leafletMarkersGroupRef.current = markersGroup;
@@ -481,17 +518,17 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         map.invalidateSize();
       }, 250);
     },
-    [renderLeafletPolygon, handleAddVertex]
+    [renderLeafletPolygon, handleAddVertex, mapType]
   );
 
   // ---------------------------------------------------------------------------
-  // Move Map to Location Helper (Works on both Google Maps and Leaflet)
+  // Move Map to Location Helper (Works reliably on whichever engine is mounted)
   // ---------------------------------------------------------------------------
   const navigateMapToCoordinates = useCallback(
-    (lat: number, lng: number, placeName: string, zoomLevel = 18) => {
+    (lat: number, lng: number, placeName: string, zoomLevel = 17) => {
       setShowSuggestionsDropdown(false);
 
-      if (activeEngine === "google" && googleMapRef.current && window.google?.maps) {
+      if (googleMapRef.current && window.google?.maps) {
         const latLng = new window.google.maps.LatLng(lat, lng);
         googleMapRef.current.panTo(latLng);
         googleMapRef.current.setZoom(zoomLevel);
@@ -515,16 +552,18 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           zIndex: 8,
         });
       } else if (leafletMapRef.current) {
-        leafletMapRef.current.setView([lat, lng], zoomLevel);
+        leafletMapRef.current.setView([lat, lng], zoomLevel, { animate: true });
         if (leafletSearchMarkerRef.current) {
           leafletMapRef.current.removeLayer(leafletSearchMarkerRef.current);
         }
-        leafletSearchMarkerRef.current = L.marker([lat, lng]).addTo(leafletMapRef.current);
+        leafletSearchMarkerRef.current = L.marker([lat, lng], {
+          title: placeName,
+        }).addTo(leafletMapRef.current);
       }
 
-      triggerToast(`Centered on: ${placeName}. Tap anywhere on the map to draw corners.`, "success");
+      triggerToast(`Centered on: ${placeName}. Tap on map to trace corners.`, "success");
     },
-    [activeEngine, triggerToast]
+    [triggerToast]
   );
 
   // ---------------------------------------------------------------------------
@@ -779,17 +818,38 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   }, [isOpen, showClearConfirm, showKeyModal, showHelpGuide, onClose]);
 
   // ---------------------------------------------------------------------------
-  // Basemap Switcher
+  // Basemap Switcher (Satellite vs Road/OSM on both Google and Leaflet)
   // ---------------------------------------------------------------------------
   const handleBasemapChange = (type: "hybrid" | "roadmap" | "satellite") => {
     setMapType(type);
-    if (activeEngine === "google" && googleMapRef.current && window.google?.maps) {
+
+    // 1. Google Maps Engine
+    if (googleMapRef.current && window.google?.maps) {
       if (type === "hybrid") {
         googleMapRef.current.setMapTypeId(window.google.maps.MapTypeId.HYBRID);
       } else if (type === "satellite") {
         googleMapRef.current.setMapTypeId(window.google.maps.MapTypeId.SATELLITE);
       } else {
         googleMapRef.current.setMapTypeId(window.google.maps.MapTypeId.ROADMAP);
+      }
+    }
+
+    // 2. Leaflet Fallback Engine (Esri Satellite vs OpenStreetMap Road)
+    if (leafletMapRef.current) {
+      if (type === "roadmap") {
+        if (leafletSatLayerRef.current && leafletMapRef.current.hasLayer(leafletSatLayerRef.current)) {
+          leafletMapRef.current.removeLayer(leafletSatLayerRef.current);
+        }
+        if (leafletRoadLayerRef.current && !leafletMapRef.current.hasLayer(leafletRoadLayerRef.current)) {
+          leafletRoadLayerRef.current.addTo(leafletMapRef.current);
+        }
+      } else {
+        if (leafletRoadLayerRef.current && leafletMapRef.current.hasLayer(leafletRoadLayerRef.current)) {
+          leafletMapRef.current.removeLayer(leafletRoadLayerRef.current);
+        }
+        if (leafletSatLayerRef.current && !leafletMapRef.current.hasLayer(leafletSatLayerRef.current)) {
+          leafletSatLayerRef.current.addTo(leafletMapRef.current);
+        }
       }
     }
   };
@@ -802,13 +862,13 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
       setIsLocating(false);
       setGpsAccuracyM(accuracy);
 
-      let zoom = 19;
-      if (accuracy > 500) zoom = 15;
-      else if (accuracy > 150) zoom = 17;
-      else if (accuracy > 30) zoom = 18;
-      else zoom = 19;
+      let zoom = 18;
+      if (accuracy > 1000) zoom = 14;
+      else if (accuracy > 300) zoom = 16;
+      else if (accuracy > 50) zoom = 17;
+      else zoom = 18;
 
-      if (activeEngine === "google" && googleMapRef.current && window.google?.maps) {
+      if (googleMapRef.current && window.google?.maps) {
         const latLng = new window.google.maps.LatLng(latitude, longitude);
         googleMapRef.current.panTo(latLng);
         googleMapRef.current.setZoom(zoom);
@@ -846,7 +906,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           zIndex: 6,
         });
       } else if (leafletMapRef.current) {
-        leafletMapRef.current.setView([latitude, longitude], zoom);
+        leafletMapRef.current.setView([latitude, longitude], zoom, { animate: true });
         if (leafletAccuracyCircleRef.current) {
           leafletMapRef.current.removeLayer(leafletAccuracyCircleRef.current);
         }
@@ -870,15 +930,15 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         }).addTo(leafletMapRef.current);
       }
 
-      if (accuracy > 100) {
-        setGpsWarning("Location accuracy is moderate. Move outdoors or search your village name above.");
-        triggerToast(`Location acquired (±${Math.round(accuracy)}m). Tap on map to start drawing.`, "warning");
+      if (accuracy > 500) {
+        setGpsWarning(`Broad network position (±${Math.round(accuracy)}m). If this is not your exact field, search your village name above or use quick jump.`);
+        triggerToast(`Network location fixed (±${Math.round(accuracy)}m). If inaccurate, type your village in search.`, "warning");
       } else {
         setGpsWarning(null);
-        triggerToast(`High accuracy fix (±${Math.round(accuracy)}m). Centered on your location.`, "success");
+        triggerToast(`Precise location acquired (±${Math.round(accuracy)}m). Centered on your position.`, "success");
       }
     },
-    [activeEngine, triggerToast]
+    [triggerToast]
   );
 
   // ---------------------------------------------------------------------------
@@ -933,67 +993,202 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   // ---------------------------------------------------------------------------
   // 1. FIND FARM: Live Search Input Changes & Geocoding Resolver
   // ---------------------------------------------------------------------------
-  const handleSearchInputChange = async (val: string) => {
+  const handleSearchInputChange = (val: string) => {
     setSearchQuery(val);
-    if (!val.trim() || val.trim().length < 2) {
+    const trimmed = val.trim();
+    if (!trimmed || trimmed.length < 2) {
       setSearchSuggestions([]);
       setShowSuggestionsDropdown(false);
       return;
     }
 
-    try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-          val.trim()
-        )}&countrycodes=in&addressdetails=1&limit=5`
-      );
-      const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
-        const formatted: SearchSuggestion[] = data.map((d: any) => ({
-          displayName: d.display_name,
-          lat: parseFloat(d.lat),
-          lng: parseFloat(d.lon),
-          type: d.type,
-        }));
-        setSearchSuggestions(formatted);
-        setShowSuggestionsDropdown(true);
-      } else {
-        setSearchSuggestions([]);
-      }
-    } catch {
-      // Ignore background suggestion network errors
+    // 1. Immediate local matching from agricultural index (0ms response)
+    const lower = trimmed.toLowerCase();
+    const localMatches: SearchSuggestion[] = QUICK_LOCATIONS.filter((l) =>
+      l.name.toLowerCase().includes(lower) || (l.state && l.state.toLowerCase().includes(lower))
+    ).map((l) => ({
+      displayName: `${l.name}, ${l.state || "India"}`,
+      lat: l.lat,
+      lng: l.lng,
+      type: "agricultural_hub",
+    }));
+
+    setSearchSuggestions(localMatches);
+    if (localMatches.length > 0) {
+      setShowSuggestionsDropdown(true);
     }
+
+    // 2. Debounced remote lookup using Photon / Nominatim (avoids anti-abuse blocking)
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+    }
+
+    searchDebounceRef.current = setTimeout(async () => {
+      try {
+        // Photon Geocoder (Komoot - fast, browser CORS enabled, OpenStreetMap data)
+        const res = await fetch(
+          `https://photon.komoot.io/api/?q=${encodeURIComponent(trimmed)}&limit=6`
+        );
+        const data = await res.json();
+        if (data?.features && Array.isArray(data.features) && data.features.length > 0) {
+          const remoteMatches: SearchSuggestion[] = data.features.map((f: any) => {
+            const props = f.properties || {};
+            const parts = [props.name, props.district || props.county, props.state, props.country].filter(Boolean);
+            return {
+              displayName: parts.join(", ") || props.name || "Location",
+              lat: f.geometry.coordinates[1],
+              lng: f.geometry.coordinates[0],
+              type: props.osm_value,
+            };
+          });
+
+          setSearchSuggestions(() => {
+            const list = [...localMatches];
+            for (const r of remoteMatches) {
+              if (!list.some((existing) => Math.abs(existing.lat - r.lat) < 0.01 && Math.abs(existing.lng - r.lng) < 0.01)) {
+                list.push(r);
+              }
+            }
+            return list.slice(0, 8);
+          });
+          setShowSuggestionsDropdown(true);
+          return;
+        }
+      } catch {
+        // Fall back to Nominatim if Photon has network issues
+        try {
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+              trimmed
+            )}&addressdetails=1&limit=5`
+          );
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            const remoteMatches: SearchSuggestion[] = data.map((d: any) => ({
+              displayName: d.display_name,
+              lat: parseFloat(d.lat),
+              lng: parseFloat(d.lon),
+              type: d.type,
+            }));
+            setSearchSuggestions(() => {
+              const list = [...localMatches];
+              for (const r of remoteMatches) {
+                if (!list.some((existing) => Math.abs(existing.lat - r.lat) < 0.01 && Math.abs(existing.lng - r.lng) < 0.01)) {
+                  list.push(r);
+                }
+              }
+              return list.slice(0, 8);
+            });
+            setShowSuggestionsDropdown(true);
+          }
+        } catch {
+          // Keep local matches if offline
+        }
+      }
+    }, 280);
   };
 
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!searchQuery.trim()) return;
+    const query = searchQuery.trim();
+    if (!query) return;
 
     setIsSearching(true);
     setGpsError(null);
     setShowSuggestionsDropdown(false);
 
+    // 1. Direct coordinate pattern detection (e.g. "17.2473, 80.1514" or "17.2473 80.1514")
+    const coordMatch = query.match(/^([+-]?\d+(?:\.\d+)?)[,\s]+([+-]?\d+(?:\.\d+)?)$/);
+    if (coordMatch) {
+      const lat = parseFloat(coordMatch[1]);
+      const lng = parseFloat(coordMatch[2]);
+      if (!isNaN(lat) && !isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+        setIsSearching(false);
+        navigateMapToCoordinates(lat, lng, `Coordinates (${lat.toFixed(4)}, ${lng.toFixed(4)})`, 18);
+        return;
+      }
+    }
+
+    // 2. Direct local agricultural preset lookup
+    const lower = query.toLowerCase();
+    const localMatch = QUICK_LOCATIONS.find((l) =>
+      l.name.toLowerCase() === lower || lower.includes(l.name.toLowerCase())
+    );
+    if (localMatch) {
+      setIsSearching(false);
+      navigateMapToCoordinates(localMatch.lat, localMatch.lng, localMatch.name, 17);
+      return;
+    }
+
+    // 3. Google Maps Geocoder if Google Maps JS is loaded
+    if (window.google?.maps?.Geocoder) {
+      try {
+        const geocoder = new window.google.maps.Geocoder();
+        const googleRes = await new Promise<any>((resolve) => {
+          geocoder.geocode({ address: query }, (results: any, status: any) => {
+            if (status === "OK" && results && results.length > 0) {
+              resolve(results[0]);
+            } else {
+              resolve(null);
+            }
+          });
+        });
+
+        if (googleRes) {
+          const lat = googleRes.geometry.location.lat();
+          const lng = googleRes.geometry.location.lng();
+          const name = googleRes.formatted_address.split(",")[0] || query;
+          setIsSearching(false);
+          navigateMapToCoordinates(lat, lng, name, 17);
+          return;
+        }
+      } catch {
+        // continue to Photon fallback
+      }
+    }
+
+    // 4. Photon Geocoder (Komoot - fast, browser CORS enabled)
+    try {
+      const res = await fetch(
+        `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=5`
+      );
+      const data = await res.json();
+      if (data?.features && Array.isArray(data.features) && data.features.length > 0) {
+        const first = data.features[0];
+        const lat = first.geometry.coordinates[1];
+        const lng = first.geometry.coordinates[0];
+        const props = first.properties || {};
+        const name = props.name || props.district || query;
+        setIsSearching(false);
+        navigateMapToCoordinates(lat, lng, name, 17);
+        return;
+      }
+    } catch {
+      // Continue to Nominatim fallback
+    }
+
+    // 5. Nominatim Fallback
     try {
       const res = await fetch(
         `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-          searchQuery.trim()
-        )}&countrycodes=in&addressdetails=1&limit=5`
+          query
+        )}&addressdetails=1&limit=5`
       );
       const data = await res.json();
-
-      if (data && data.length > 0) {
+      if (Array.isArray(data) && data.length > 0) {
         const lat = parseFloat(data[0].lat);
-        const lon = parseFloat(data[0].lon);
+        const lng = parseFloat(data[0].lon);
         const name = data[0].display_name.split(",")[0];
-        navigateMapToCoordinates(lat, lon, name, 18);
-      } else {
-        triggerToast("Location not found. Try entering a nearby town or mandal name.", "warning");
+        setIsSearching(false);
+        navigateMapToCoordinates(lat, lng, name, 17);
+        return;
       }
     } catch {
-      triggerToast("Search connection failed. Please check internet connection.", "warning");
-    } finally {
-      setIsSearching(false);
+      // Fall through to error
     }
+
+    setIsSearching(false);
+    triggerToast(`Location "${query}" not found. Try searching a nearby town (e.g. Khammam, Eluru, Pedavegi) or jump from the list below.`, "warning");
   };
 
   // ---------------------------------------------------------------------------
@@ -1266,11 +1461,12 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
                 key={t}
                 type="button"
                 onClick={() => handleBasemapChange(t)}
+                title={t === "hybrid" ? "Satellite imagery view" : "Road & OpenStreetMap street view"}
                 className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition-all cursor-pointer ${
                   mapType === t ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-white"
                 }`}
               >
-                {t === "hybrid" ? "Satellite" : "Road"}
+                {t === "hybrid" ? "Satellite" : "Road / OSM"}
               </button>
             ))}
           </div>
