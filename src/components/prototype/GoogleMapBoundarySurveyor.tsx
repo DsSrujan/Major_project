@@ -60,6 +60,7 @@ import {
 import {
   loadGoogleMaps,
   setGoogleMapsApiKeyOverride,
+  getGoogleMapsApiKey,
 } from "../../lib/googleMapsLoader";
 
 import "leaflet/dist/leaflet.css";
@@ -96,6 +97,38 @@ export interface GoogleMapBoundarySurveyorProps {
 
 const DEFAULT_CENTER = { lat: 17.3912, lng: 78.4948 }; // Andhra Pradesh / Telangana Oil Palm Belt
 const DEFAULT_FARM_ZOOM = 18;
+
+// Regional coordinate bias (Karnataka / Andhra Pradesh / Telangana Southern India zone)
+const REGIONAL_BIAS_LAT = 12.9716;
+const REGIONAL_BIAS_LNG = 77.5946;
+
+// Fix Leaflet default marker icon asset paths in Vite / browser bundlers
+delete (L.Icon.Default.prototype as any)._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+});
+
+// Custom SVG map marker for searched locations (non-interactive so clicking directly adds vertices)
+const createSearchPinIcon = (placeName: string) =>
+  L.divIcon({
+    className: "custom-leaflet-search-pin",
+    html: `
+      <div style="position: relative; display: flex; flex-direction: column; align-items: center; transform: translate(-50%, -100%); pointer-events: none;">
+        <div style="background-color: #0f172a; color: #10b981; border: 1.5px solid #10b981; font-weight: 700; font-size: 11px; padding: 2px 8px; border-radius: 6px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); white-space: nowrap; margin-bottom: 2px;">
+          ${placeName}
+        </div>
+        <svg width="26" height="34" viewBox="0 0 24 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 0C5.37258 0 0 5.37258 0 12C0 20.25 12 32 12 32C12 32 24 20.25 24 12C24 5.37258 18.6274 0 12 0Z" fill="#10b981"/>
+          <circle cx="12" cy="12" r="4.5" fill="#ffffff"/>
+        </svg>
+      </div>
+    `,
+    iconSize: [0, 0],
+    iconAnchor: [0, 0],
+  });
+
 
 interface QuickLocation {
   name: string;
@@ -184,7 +217,17 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
 
   // Drawing & Plot Creation State
   const [isDrawingActive, setIsDrawingActive] = useState(true);
-  const [activeEngine, setActiveEngine] = useState<"google" | "satellite_fallback">("google");
+  const [activeEngine, setActiveEngine] = useState<"google" | "satellite_fallback">(() =>
+    getGoogleMapsApiKey() ? "google" : "satellite_fallback"
+  );
+  const activeEngineRef = useRef<"google" | "satellite_fallback">(
+    getGoogleMapsApiKey() ? "google" : "satellite_fallback"
+  );
+  activeEngineRef.current = activeEngine;
+
+  const mapTypeRef = useRef<"hybrid" | "roadmap" | "satellite">("hybrid");
+  const pendingCenterRef = useRef<{ lat: number; lng: number; name: string; zoom: number } | null>(null);
+
   const [areaUnit, setAreaUnit] = useState<"acres" | "hectares">(defaultAreaUnit);
   const [mapType, setMapType] = useState<"hybrid" | "roadmap" | "satellite">("hybrid");
   const [vertices, setVertices] = useState<Array<{ lat: number; lng: number }>>([]);
@@ -325,48 +368,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   );
 
   // ---------------------------------------------------------------------------
-  // Core: Add Vertex Handler (Called on map/canvas tap or click)
-  // ---------------------------------------------------------------------------
-  const handleAddVertex = useCallback(
-    (lat: number, lng: number) => {
-      setVertices((prev) => {
-        const updated = [...prev, { lat, lng }];
-        verticesRef.current = updated;
-
-        // Sync with Google Maps layers
-        if (activeEngine === "google" && googleMapRef.current && window.google?.maps) {
-          isSyncingGooglePathRef.current = true;
-          const latLng = new window.google.maps.LatLng(lat, lng);
-
-          if (googlePolygonRef.current) {
-            const path = googlePolygonRef.current.getPath();
-            path.push(latLng);
-
-            if (updated.length < 3 && googlePolylineRef.current) {
-              googlePolylineRef.current.setPath(path);
-              googlePolygonRef.current.setVisible(false);
-            } else if (updated.length >= 3) {
-              googlePolygonRef.current.setVisible(true);
-              if (googlePolylineRef.current) googlePolylineRef.current.setPath([]);
-            }
-          }
-          isSyncingGooglePathRef.current = false;
-        }
-
-        // Sync with Leaflet fallback layers
-        if (activeEngine === "satellite_fallback" && leafletMapRef.current) {
-          renderLeafletPolygon(updated);
-        }
-
-        recalculateGeometry(updated);
-        return updated;
-      });
-    },
-    [activeEngine, recalculateGeometry]
-  );
-
-  // ---------------------------------------------------------------------------
-  // Leaflet Satellite Fallback Engine
+  // Leaflet Satellite Fallback Engine: Polygon & Vertex Layers
   // ---------------------------------------------------------------------------
   const renderLeafletPolygon = useCallback(
     (pts: Array<{ lat: number; lng: number }>) => {
@@ -427,108 +429,203 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
     [recalculateGeometry]
   );
 
+  // ---------------------------------------------------------------------------
+  // Core: Add Vertex Handler (Called on map/canvas tap or click)
+  // ---------------------------------------------------------------------------
+  const handleAddVertex = useCallback(
+    (lat: number, lng: number) => {
+      setVertices((prev) => {
+        const updated = [...prev, { lat, lng }];
+        verticesRef.current = updated;
+
+        // Sync with Google Maps layers
+        if (googlePolygonRef.current && window.google?.maps) {
+          isSyncingGooglePathRef.current = true;
+          const latLng = new window.google.maps.LatLng(lat, lng);
+
+          const path = googlePolygonRef.current.getPath();
+          path.push(latLng);
+
+          if (updated.length < 3 && googlePolylineRef.current) {
+            googlePolylineRef.current.setPath(path);
+            googlePolygonRef.current.setVisible(false);
+          } else if (updated.length >= 3) {
+            googlePolygonRef.current.setVisible(true);
+            if (googlePolylineRef.current) googlePolylineRef.current.setPath([]);
+          }
+          isSyncingGooglePathRef.current = false;
+        }
+
+        // Sync with Leaflet fallback layers
+        if (leafletMapRef.current) {
+          renderLeafletPolygon(updated);
+        }
+
+        recalculateGeometry(updated);
+        return updated;
+      });
+    },
+    [renderLeafletPolygon, recalculateGeometry]
+  );
+
+  // ---------------------------------------------------------------------------
+  // Initialize Leaflet Fallback Engine (Robust against React re-renders)
+  // ---------------------------------------------------------------------------
   const initLeafletFallback = useCallback(
-    (coords: Array<{ lat: number; lng: number }>) => {
+    (coords: Array<{ lat: number; lng: number }> = []) => {
       if (!mapContainerRef.current) return;
+
+      // Safely remove existing Leaflet instance if present
       if (leafletMapRef.current) {
-        leafletMapRef.current.remove();
+        try {
+          leafletMapRef.current.remove();
+        } catch (err) {
+          console.warn("[Leaflet] Previous map cleanup error:", err);
+        }
         leafletMapRef.current = null;
       }
+
+      // Crucial: Leaflet caches container references via _leaflet_id.
+      // Must be cleared so React remounts do not throw "Map container is already initialized."
+      if ((mapContainerRef.current as any)._leaflet_id) {
+        delete (mapContainerRef.current as any)._leaflet_id;
+      }
+      mapContainerRef.current.innerHTML = "";
 
       let center: [number, number] = [DEFAULT_CENTER.lat, DEFAULT_CENTER.lng];
       let zoom = DEFAULT_FARM_ZOOM;
 
-      if (coords.length > 0) {
+      if (pendingCenterRef.current) {
+        center = [pendingCenterRef.current.lat, pendingCenterRef.current.lng];
+        zoom = pendingCenterRef.current.zoom;
+      } else if (coords.length > 0) {
         center = [coords[0].lat, coords[0].lng];
       }
 
-      const map = L.map(mapContainerRef.current, {
-        center,
-        zoom,
-        zoomControl: false,
-        attributionControl: false,
-        doubleClickZoom: false,
-      });
+      try {
+        const map = L.map(mapContainerRef.current, {
+          center,
+          zoom,
+          zoomControl: false,
+          attributionControl: false,
+          doubleClickZoom: false,
+          preferCanvas: true,
+        });
 
-      // 1. High-resolution satellite tiles (Esri World Imagery)
-      const satLayer = L.tileLayer(
-        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        { maxZoom: 19, attribution: "© Esri, Maxar, Earthstar" }
-      );
-      leafletSatLayerRef.current = satLayer;
+        // 1. High-resolution satellite tiles (Esri World Imagery)
+        const satLayer = L.tileLayer(
+          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+          { maxZoom: 19, attribution: "© Esri, Maxar, Earthstar" }
+        );
+        leafletSatLayerRef.current = satLayer;
 
-      // 2. OpenStreetMap Standard / Road tiles
-      const roadLayer = L.tileLayer(
-        "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-        { maxZoom: 19, attribution: "© OpenStreetMap contributors" }
-      );
-      leafletRoadLayerRef.current = roadLayer;
+        // 2. OpenStreetMap Standard / Road tiles
+        const roadLayer = L.tileLayer(
+          "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+          { maxZoom: 19, attribution: "© OpenStreetMap contributors" }
+        );
+        leafletRoadLayerRef.current = roadLayer;
 
-      // Add appropriate active basemap layer
-      if (mapType === "roadmap") {
-        roadLayer.addTo(map);
-      } else {
-        satLayer.addTo(map);
-      }
+        // Add appropriate basemap layer based on current selection
+        if (mapTypeRef.current === "roadmap") {
+          roadLayer.addTo(map);
+        } else {
+          satLayer.addTo(map);
+        }
 
-      const markersGroup = L.layerGroup().addTo(map);
-      leafletMarkersGroupRef.current = markersGroup;
+        const markersGroup = L.layerGroup().addTo(map);
+        leafletMarkersGroupRef.current = markersGroup;
 
-      const polygon = L.polygon([], {
-        color: "#10b981",
-        fillColor: "#10b981",
-        fillOpacity: 0.35,
-        weight: 3,
-        interactive: true,
-      }).addTo(map);
-      leafletPolygonRef.current = polygon;
+        const polygon = L.polygon([], {
+          color: "#10b981",
+          fillColor: "#10b981",
+          fillOpacity: 0.35,
+          weight: 3,
+          interactive: true,
+        }).addTo(map);
+        leafletPolygonRef.current = polygon;
 
-      const polyline = L.polyline([], {
-        color: "#34d399",
-        weight: 2.5,
-        dashArray: "4, 6",
-        interactive: false,
-      }).addTo(map);
-      leafletPolylineRef.current = polyline;
+        const polyline = L.polyline([], {
+          color: "#34d399",
+          weight: 2.5,
+          dashArray: "4, 6",
+          interactive: false,
+        }).addTo(map);
+        leafletPolylineRef.current = polyline;
 
-      const onMapClick = (e: L.LeafletMouseEvent) => {
-        if (!isDrawingActiveRef.current) {
+        const onMapClick = (e: L.LeafletMouseEvent) => {
+          if (!isDrawingActiveRef.current) {
+            setIsDrawingActive(true);
+          }
+          handleAddVertex(e.latlng.lat, e.latlng.lng);
+        };
+
+        map.on("click", onMapClick);
+        polygon.on("click", onMapClick);
+
+        if (coords.length >= 3) {
+          renderLeafletPolygon(coords);
+          const bounds = L.latLngBounds(coords.map((c) => [c.lat, c.lng]));
+          map.fitBounds(bounds, { padding: [60, 60], maxZoom: 19 });
+          setIsDrawingActive(false);
+        } else {
           setIsDrawingActive(true);
         }
-        handleAddVertex(e.latlng.lat, e.latlng.lng);
-      };
 
-      map.on("click", onMapClick);
-      polygon.on("click", onMapClick);
+        // Apply pending location pin if any
+        if (pendingCenterRef.current) {
+          const { lat, lng, name, zoom: targetZoom } = pendingCenterRef.current;
+          map.setView([lat, lng], targetZoom);
+          if (leafletSearchMarkerRef.current) {
+            map.removeLayer(leafletSearchMarkerRef.current);
+          }
+          leafletSearchMarkerRef.current = L.marker([lat, lng], {
+            icon: createSearchPinIcon(name),
+            title: name,
+            interactive: false,
+          }).addTo(map);
+          pendingCenterRef.current = null;
+        }
 
-      if (coords.length >= 3) {
-        renderLeafletPolygon(coords);
-        const bounds = L.latLngBounds(coords.map((c) => [c.lat, c.lng]));
-        map.fitBounds(bounds, { padding: [60, 60], maxZoom: 19 });
-        setIsDrawingActive(false);
-      } else {
-        setIsDrawingActive(true);
+        leafletMapRef.current = map;
+        setActiveEngine("satellite_fallback");
+        setIsLoadingMaps(false);
+
+        setTimeout(() => {
+          map.invalidateSize();
+        }, 100);
+        setTimeout(() => {
+          map.invalidateSize();
+        }, 350);
+      } catch (err) {
+        console.error("[Leaflet] Initialization error:", err);
+        setIsLoadingMaps(false);
       }
-
-      leafletMapRef.current = map;
-      setActiveEngine("satellite_fallback");
-      setIsLoadingMaps(false);
-
-      setTimeout(() => {
-        map.invalidateSize();
-      }, 250);
     },
-    [renderLeafletPolygon, handleAddVertex, mapType]
+    [renderLeafletPolygon, handleAddVertex]
   );
 
   // ---------------------------------------------------------------------------
   // Move Map to Location Helper (Works reliably on whichever engine is mounted)
   // ---------------------------------------------------------------------------
   const navigateMapToCoordinates = useCallback(
-    (lat: number, lng: number, placeName: string, zoomLevel = 17) => {
+    (lat: number, lng: number, placeName: string, zoomLevel = 18) => {
       setShowSuggestionsDropdown(false);
+      setGpsError(null);
+      pendingCenterRef.current = { lat, lng, name: placeName, zoom: zoomLevel };
 
-      if (googleMapRef.current && window.google?.maps) {
+      if (leafletMapRef.current) {
+        leafletMapRef.current.setView([lat, lng], zoomLevel, { animate: true });
+        if (leafletSearchMarkerRef.current) {
+          leafletMapRef.current.removeLayer(leafletSearchMarkerRef.current);
+        }
+        leafletSearchMarkerRef.current = L.marker([lat, lng], {
+          icon: createSearchPinIcon(placeName),
+          title: placeName,
+          interactive: false,
+        }).addTo(leafletMapRef.current);
+        pendingCenterRef.current = null;
+      } else if (googleMapRef.current && window.google?.maps) {
         const latLng = new window.google.maps.LatLng(lat, lng);
         googleMapRef.current.panTo(latLng);
         googleMapRef.current.setZoom(zoomLevel);
@@ -550,20 +647,18 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
             strokeWeight: 2,
           },
           zIndex: 8,
+          clickable: false,
         });
-      } else if (leafletMapRef.current) {
-        leafletMapRef.current.setView([lat, lng], zoomLevel, { animate: true });
-        if (leafletSearchMarkerRef.current) {
-          leafletMapRef.current.removeLayer(leafletSearchMarkerRef.current);
-        }
-        leafletSearchMarkerRef.current = L.marker([lat, lng], {
-          title: placeName,
-        }).addTo(leafletMapRef.current);
+        pendingCenterRef.current = null;
+      } else {
+        // Map engine was not yet mounted, force initialize Leaflet fallback at these coordinates
+        console.info("[Navigation] Map not ready yet, booting Leaflet at:", lat, lng);
+        initLeafletFallback([{ lat, lng }]);
       }
 
       triggerToast(`Centered on: ${placeName}. Tap on map to trace corners.`, "success");
     },
-    [triggerToast]
+    [triggerToast, initLeafletFallback]
   );
 
   // ---------------------------------------------------------------------------
@@ -576,9 +671,16 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
       setMapsLoadError(null);
 
       const initialCoords = getInitialCoordinates();
+      const apiKey = keyOverride || getGoogleMapsApiKey();
+
+      // Zero-cost open-source Leaflet is primary when no Google Maps API key is configured
+      if (!apiKey) {
+        initLeafletFallback(initialCoords);
+        return;
+      }
 
       try {
-        const google = await loadGoogleMaps(keyOverride);
+        const google = await loadGoogleMaps(apiKey);
         if (!mapContainerRef.current) return;
 
         let center = DEFAULT_CENTER;
@@ -748,10 +850,13 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   }, [isSidebarOpen, activeEngine]);
 
   // ---------------------------------------------------------------------------
-  // Lifecycle Hook
+  // Lifecycle Hook (Guaranteed single initialization per modal open session)
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (isOpen) {
+    if (!isOpen) return;
+
+    // Small delay ensures portal DOM is mounted and dimensions are set
+    const timer = setTimeout(() => {
       const initialCoords = getInitialCoordinates();
       setVertices(initialCoords);
       verticesRef.current = initialCoords;
@@ -761,9 +866,10 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         setIsDrawingActive(true);
       }
       initGoogleMaps();
-    }
+    }, 50);
 
     return () => {
+      clearTimeout(timer);
       if (googlePolygonRef.current) {
         googlePolygonRef.current.setMap(null);
         googlePolygonRef.current = null;
@@ -785,12 +891,22 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         googleSearchMarkerRef.current = null;
       }
       if (leafletMapRef.current) {
-        leafletMapRef.current.remove();
+        try {
+          leafletMapRef.current.remove();
+        } catch (err) {
+          console.warn("[Leaflet] Cleanup error:", err);
+        }
         leafletMapRef.current = null;
+      }
+      if (mapContainerRef.current) {
+        if ((mapContainerRef.current as any)._leaflet_id) {
+          delete (mapContainerRef.current as any)._leaflet_id;
+        }
+        mapContainerRef.current.innerHTML = "";
       }
       googleMapRef.current = null;
     };
-  }, [isOpen, initGoogleMaps, getInitialCoordinates]);
+  }, [isOpen]);
 
   // Keyboard Shortcuts (Escape to close, Ctrl+Z to undo)
   useEffect(() => {
@@ -822,6 +938,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   // ---------------------------------------------------------------------------
   const handleBasemapChange = (type: "hybrid" | "roadmap" | "satellite") => {
     setMapType(type);
+    mapTypeRef.current = type;
 
     // 1. Google Maps Engine
     if (googleMapRef.current && window.google?.maps) {
@@ -868,6 +985,8 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
       else if (accuracy > 50) zoom = 17;
       else zoom = 18;
 
+      pendingCenterRef.current = { lat: latitude, lng: longitude, name: "My Location", zoom };
+
       if (googleMapRef.current && window.google?.maps) {
         const latLng = new window.google.maps.LatLng(latitude, longitude);
         googleMapRef.current.panTo(latLng);
@@ -905,17 +1024,19 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           },
           zIndex: 6,
         });
+        pendingCenterRef.current = null;
       } else if (leafletMapRef.current) {
         leafletMapRef.current.setView([latitude, longitude], zoom, { animate: true });
         if (leafletAccuracyCircleRef.current) {
           leafletMapRef.current.removeLayer(leafletAccuracyCircleRef.current);
         }
         leafletAccuracyCircleRef.current = L.circle([latitude, longitude], {
-          radius: accuracy,
+          radius: Math.max(accuracy, 10),
           color: accuracy > 100 ? "#f59e0b" : "#3b82f6",
           fillColor: accuracy > 100 ? "#f59e0b" : "#3b82f6",
           fillOpacity: 0.15,
           weight: 1.5,
+          interactive: false,
         }).addTo(leafletMapRef.current);
 
         if (leafletUserMarkerRef.current) {
@@ -927,10 +1048,15 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           fillColor: accuracy > 100 ? "#f59e0b" : "#2563eb",
           fillOpacity: 1,
           weight: 2.5,
+          interactive: false,
         }).addTo(leafletMapRef.current);
+        pendingCenterRef.current = null;
+      } else {
+        console.info("[GPS] Map engine not initialized yet, booting Leaflet at GPS fix:", latitude, longitude);
+        initLeafletFallback([{ lat: latitude, lng: longitude }]);
       }
 
-      if (accuracy > 500) {
+      if (accuracy > 1500) {
         setGpsWarning(`Broad network position (±${Math.round(accuracy)}m). If this is not your exact field, search your village name above or use quick jump.`);
         triggerToast(`Network location fixed (±${Math.round(accuracy)}m). If inaccurate, type your village in search.`, "warning");
       } else {
@@ -938,17 +1064,18 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         triggerToast(`Precise location acquired (±${Math.round(accuracy)}m). Centered on your position.`, "success");
       }
     },
-    [triggerToast]
+    [triggerToast, initLeafletFallback]
   );
 
   // ---------------------------------------------------------------------------
-  // 1. FIND FARM: Resilient Geolocation Handler
+  // 1. FIND FARM: Resilient HTML5 Geolocation Handler (High Accuracy, No Silent Fallback)
   // ---------------------------------------------------------------------------
   const handleUseCurrentLocation = useCallback(() => {
     if (!navigator.geolocation) {
       const err = "Geolocation is not supported by your browser or device.";
-      setGpsError(err);
-      triggerToast(err, "warning");
+      console.warn("[GPS] navigator.geolocation not available in this browser environment.");
+      setGpsError(`${err} Please use the village search bar above to locate your farm.`);
+      triggerToast("Geolocation not supported. Please use the search bar above.", "warning");
       return;
     }
 
@@ -956,42 +1083,54 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
     setGpsError(null);
     setGpsWarning(null);
 
-    const tryPosition = (highAccuracy: boolean) => {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          applyLocationFix(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
-        },
-        (err) => {
-          if (highAccuracy) {
-            tryPosition(false);
-            return;
-          }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setIsLocating(false);
+        const { latitude, longitude, accuracy } = pos.coords;
 
-          setIsLocating(false);
-          let msg = "Could not obtain your current location.";
-          if (err.code === err.PERMISSION_DENIED) {
-            msg = "Location permission was denied. Please enable location access in browser settings.";
-          } else if (err.code === err.POSITION_UNAVAILABLE) {
-            msg = "GPS position unavailable. Try searching your village name above.";
-          } else if (err.code === err.TIMEOUT) {
-            msg = "Location request timed out. Please try again.";
-          }
-          setGpsError(msg);
-          triggerToast(msg, "warning");
-        },
-        {
-          enableHighAccuracy: highAccuracy,
-          timeout: highAccuracy ? 8000 : 12000,
-          maximumAge: 0,
+        if (isNaN(latitude) || isNaN(longitude)) {
+          console.warn("[GPS] Geolocation returned NaN coordinates:", pos.coords);
+          setGpsError("GPS returned invalid coordinates. Please search your village manually.");
+          triggerToast("Invalid GPS fix. Please use manual search.", "warning");
+          return;
         }
-      );
-    };
 
-    tryPosition(true);
+        console.info(
+          `[GPS] Location fix acquired: lat=${latitude.toFixed(6)}, lng=${longitude.toFixed(6)}, accuracy=±${Math.round(accuracy)}m`
+        );
+        applyLocationFix(latitude, longitude, accuracy);
+      },
+      (err) => {
+        setIsLocating(false);
+        console.warn(
+          `[GPS] Geolocation failed (code ${err.code}: ${err.message}). ` +
+          "Desktop browsers and localhost environments without dedicated GPS hardware often fail or timeout. " +
+          "Guiding user to manual search bar."
+        );
+
+        let userMsg = "Could not obtain device location. Please search your village or mandal manually above.";
+        if (err.code === err.PERMISSION_DENIED) {
+          userMsg = "Location permission denied. Please allow location access in browser settings or use the search bar above to find your farm.";
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          userMsg = "GPS position unavailable on this device. Please type your village, mandal, or district in the search bar above.";
+        } else if (err.code === err.TIMEOUT) {
+          userMsg = "GPS request timed out. If on desktop/laptop without dedicated GPS, please use the search bar above to find your village.";
+        }
+
+        // CRUCIAL: Remove silent fallback to hardcoded wrong location!
+        setGpsError(userMsg);
+        triggerToast(userMsg, "warning");
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0,
+      }
+    );
   }, [applyLocationFix, triggerToast]);
 
   // ---------------------------------------------------------------------------
-  // 1. FIND FARM: Live Search Input Changes & Geocoding Resolver
+  // 1. FIND FARM: Live Search Input Changes & Photon API Autocomplete
   // ---------------------------------------------------------------------------
   const handleSearchInputChange = (val: string) => {
     setSearchQuery(val);
@@ -1018,34 +1157,52 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
       setShowSuggestionsDropdown(true);
     }
 
-    // 2. Debounced remote lookup using Photon / Nominatim (avoids anti-abuse blocking)
+    // 2. Debounced remote lookup using Photon API with regional coordinate bias
     if (searchDebounceRef.current) {
       clearTimeout(searchDebounceRef.current);
     }
 
     searchDebounceRef.current = setTimeout(async () => {
       try {
-        // Photon Geocoder (Komoot - fast, browser CORS enabled, OpenStreetMap data)
-        const res = await fetch(
-          `https://photon.komoot.io/api/?q=${encodeURIComponent(trimmed)}&limit=6`
+        const center = leafletMapRef.current?.getCenter?.();
+        const biasLat = center?.lat ?? REGIONAL_BIAS_LAT;
+        const biasLng = center?.lng ?? REGIONAL_BIAS_LNG;
+
+        // Photon Geocoder (Komoot - fast, browser CORS enabled, OpenStreetMap data) with regional bias
+        let res = await fetch(
+          `https://photon.komoot.io/api/?q=${encodeURIComponent(trimmed)}&lat=${biasLat}&lon=${biasLng}&limit=8`
         );
-        const data = await res.json();
+        let data = await res.json();
+
+        // If no results, retry with ", India" to ensure local villages match
+        if (!data?.features || data.features.length === 0) {
+          res = await fetch(
+            `https://photon.komoot.io/api/?q=${encodeURIComponent(trimmed + ", India")}&lat=${biasLat}&lon=${biasLng}&limit=8`
+          );
+          data = await res.json();
+        }
+
         if (data?.features && Array.isArray(data.features) && data.features.length > 0) {
           const remoteMatches: SearchSuggestion[] = data.features.map((f: any) => {
             const props = f.properties || {};
-            const parts = [props.name, props.district || props.county, props.state, props.country].filter(Boolean);
+            const parts = [
+              props.name,
+              props.district || props.county || props.city,
+              props.state,
+              props.country,
+            ].filter(Boolean);
             return {
               displayName: parts.join(", ") || props.name || "Location",
-              lat: f.geometry.coordinates[1],
-              lng: f.geometry.coordinates[0],
-              type: props.osm_value,
+              lat: Number(f.geometry.coordinates[1]),
+              lng: Number(f.geometry.coordinates[0]),
+              type: props.osm_value || props.type,
             };
-          });
+          }).filter((m: SearchSuggestion) => !isNaN(m.lat) && !isNaN(m.lng));
 
           setSearchSuggestions(() => {
             const list = [...localMatches];
             for (const r of remoteMatches) {
-              if (!list.some((existing) => Math.abs(existing.lat - r.lat) < 0.01 && Math.abs(existing.lng - r.lng) < 0.01)) {
+              if (!list.some((existing) => Math.abs(existing.lat - r.lat) < 0.005 && Math.abs(existing.lng - r.lng) < 0.005)) {
                 list.push(r);
               }
             }
@@ -1054,13 +1211,14 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           setShowSuggestionsDropdown(true);
           return;
         }
-      } catch {
-        // Fall back to Nominatim if Photon has network issues
+      } catch (err) {
+        console.warn("[Search] Photon autocomplete lookup failed:", err);
+        // Fall back to Nominatim with India countrycode restriction
         try {
           const res = await fetch(
             `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
               trimmed
-            )}&addressdetails=1&limit=5`
+            )}&countrycodes=in&addressdetails=1&limit=5`
           );
           const data = await res.json();
           if (Array.isArray(data) && data.length > 0) {
@@ -1069,11 +1227,12 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
               lat: parseFloat(d.lat),
               lng: parseFloat(d.lon),
               type: d.type,
-            }));
+            })).filter((m: SearchSuggestion) => !isNaN(m.lat) && !isNaN(m.lng));
+
             setSearchSuggestions(() => {
               const list = [...localMatches];
               for (const r of remoteMatches) {
-                if (!list.some((existing) => Math.abs(existing.lat - r.lat) < 0.01 && Math.abs(existing.lng - r.lng) < 0.01)) {
+                if (!list.some((existing) => Math.abs(existing.lat - r.lat) < 0.005 && Math.abs(existing.lng - r.lng) < 0.005)) {
                   list.push(r);
                 }
               }
@@ -1116,79 +1275,75 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
     );
     if (localMatch) {
       setIsSearching(false);
-      navigateMapToCoordinates(localMatch.lat, localMatch.lng, localMatch.name, 17);
+      navigateMapToCoordinates(localMatch.lat, localMatch.lng, localMatch.name, 18);
       return;
     }
 
-    // 3. Google Maps Geocoder if Google Maps JS is loaded
-    if (window.google?.maps?.Geocoder) {
-      try {
-        const geocoder = new window.google.maps.Geocoder();
-        const googleRes = await new Promise<any>((resolve) => {
-          geocoder.geocode({ address: query }, (results: any, status: any) => {
-            if (status === "OK" && results && results.length > 0) {
-              resolve(results[0]);
-            } else {
-              resolve(null);
-            }
-          });
-        });
-
-        if (googleRes) {
-          const lat = googleRes.geometry.location.lat();
-          const lng = googleRes.geometry.location.lng();
-          const name = googleRes.formatted_address.split(",")[0] || query;
-          setIsSearching(false);
-          navigateMapToCoordinates(lat, lng, name, 17);
-          return;
-        }
-      } catch {
-        // continue to Photon fallback
-      }
-    }
-
-    // 4. Photon Geocoder (Komoot - fast, browser CORS enabled)
+    // 3. Primary: Photon Geocoder (Komoot - 100% free open-source OSM geocoder)
+    // Add regional coordinate bias (lat=12.9716, lon=77.5946 near Karnataka/India)
     try {
-      const res = await fetch(
-        `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=5`
+      const center = leafletMapRef.current?.getCenter?.();
+      const biasLat = center?.lat ?? REGIONAL_BIAS_LAT;
+      const biasLng = center?.lng ?? REGIONAL_BIAS_LNG;
+
+      let res = await fetch(
+        `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&lat=${biasLat}&lon=${biasLng}&limit=6`
       );
-      const data = await res.json();
+      let data = await res.json();
+
+      // If no results for raw input, append ", India" to ensure local Indian villages/mandals resolve
+      if (!data?.features || data.features.length === 0) {
+        res = await fetch(
+          `https://photon.komoot.io/api/?q=${encodeURIComponent(query + ", India")}&lat=${biasLat}&lon=${biasLng}&limit=6`
+        );
+        data = await res.json();
+      }
+
       if (data?.features && Array.isArray(data.features) && data.features.length > 0) {
         const first = data.features[0];
-        const lat = first.geometry.coordinates[1];
-        const lng = first.geometry.coordinates[0];
-        const props = first.properties || {};
-        const name = props.name || props.district || query;
-        setIsSearching(false);
-        navigateMapToCoordinates(lat, lng, name, 17);
-        return;
+        const lat = Number(first.geometry.coordinates[1]);
+        const lng = Number(first.geometry.coordinates[0]);
+        if (!isNaN(lat) && !isNaN(lng)) {
+          const props = first.properties || {};
+          const parts = [
+            props.name,
+            props.district || props.county || props.city,
+            props.state,
+          ].filter(Boolean);
+          const name = parts.join(", ") || props.name || query;
+          setIsSearching(false);
+          navigateMapToCoordinates(lat, lng, name, 18);
+          return;
+        }
       }
-    } catch {
-      // Continue to Nominatim fallback
+    } catch (err) {
+      console.warn("[Search] Photon lookup failed, trying backup geocoder:", err);
     }
 
-    // 5. Nominatim Fallback
+    // 4. Fallback: Nominatim OpenStreetMap (Restricted to India)
     try {
       const res = await fetch(
         `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
           query
-        )}&addressdetails=1&limit=5`
+        )}&countrycodes=in&addressdetails=1&limit=5`
       );
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
         const lat = parseFloat(data[0].lat);
         const lng = parseFloat(data[0].lon);
-        const name = data[0].display_name.split(",")[0];
-        setIsSearching(false);
-        navigateMapToCoordinates(lat, lng, name, 17);
-        return;
+        if (!isNaN(lat) && !isNaN(lng)) {
+          const name = data[0].display_name.split(",")[0] || query;
+          setIsSearching(false);
+          navigateMapToCoordinates(lat, lng, name, 18);
+          return;
+        }
       }
-    } catch {
-      // Fall through to error
+    } catch (err) {
+      console.warn("[Search] Nominatim fallback failed:", err);
     }
 
     setIsSearching(false);
-    triggerToast(`Location "${query}" not found. Try searching a nearby town (e.g. Khammam, Eluru, Pedavegi) or jump from the list below.`, "warning");
+    triggerToast(`Location "${query}" not found. Try searching a nearby town (e.g. Khammam, Eluru, Pedavegi) or choose from the list below.`, "warning");
   };
 
   // ---------------------------------------------------------------------------
@@ -1956,14 +2111,33 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
                 </div>
               )}
               {gpsError && (
-                <div className="bg-rose-950/90 border border-rose-800 px-3 py-2 rounded-xl text-xs text-rose-200 flex items-center justify-between gap-2 shadow-xl">
-                  <span className="text-[11px] font-semibold">{gpsError}</span>
+                <div className="bg-rose-950/95 border border-rose-700 p-3 rounded-xl text-xs text-rose-200 flex flex-col gap-2 shadow-2xl backdrop-blur-md">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold text-xs text-rose-300">Device GPS Unavailable</p>
+                        <p className="text-[11px] text-rose-200 mt-0.5 leading-snug">{gpsError}</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setGpsError(null)}
+                      className="text-rose-400 hover:text-white p-0.5 shrink-0 cursor-pointer"
+                      title="Dismiss alert"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                   <button
                     type="button"
-                    onClick={() => setGpsError(null)}
-                    className="text-rose-400 hover:text-white p-0.5"
+                    onClick={() => {
+                      setGpsError(null);
+                      searchInputRef.current?.focus();
+                    }}
+                    className="self-end px-2.5 py-1 bg-rose-800/80 hover:bg-rose-700 text-white text-[10px] font-bold rounded-lg transition-colors cursor-pointer"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    Use Search Bar
                   </button>
                 </div>
               )}

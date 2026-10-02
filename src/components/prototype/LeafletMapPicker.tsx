@@ -20,6 +20,7 @@ import {
   Layers as LayersIcon,
   Maximize2,
   CheckCircle2,
+  Navigation,
 } from "lucide-react";
 import {
   computePolygonAreaAcres,
@@ -82,6 +83,29 @@ function getSatelliteTileConfig(): { url: string; attribution: string; maxZoom: 
 const STANDARD_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
 const STANDARD_ATTRIBUTION = "© OpenStreetMap contributors";
 
+// Regional coordinate bias (Karnataka / Andhra Pradesh / Telangana Southern India zone)
+const REGIONAL_BIAS_LAT = 12.9716;
+const REGIONAL_BIAS_LNG = 77.5946;
+
+// Custom SVG map marker for searched locations
+const createSearchPinIcon = (placeName: string) =>
+  L.divIcon({
+    className: "custom-leaflet-search-pin",
+    html: `
+      <div style="position: relative; display: flex; flex-direction: column; align-items: center; transform: translate(-50%, -100%); pointer-events: none;">
+        <div style="background-color: #0f172a; color: #10b981; border: 1.5px solid #10b981; font-weight: 700; font-size: 11px; padding: 2px 8px; border-radius: 6px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); white-space: nowrap; margin-bottom: 2px;">
+          ${placeName}
+        </div>
+        <svg width="26" height="34" viewBox="0 0 24 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 0C5.37258 0 0 5.37258 0 12C0 20.25 12 32 12 32C12 32 24 20.25 24 12C24 5.37258 18.6274 0 12 0Z" fill="#10b981"/>
+          <circle cx="12" cy="12" r="4.5" fill="#ffffff"/>
+        </svg>
+      </div>
+    `,
+    iconSize: [0, 0],
+    iconAnchor: [0, 0],
+  });
+
 const LeafletMapPicker: React.FC<LeafletMapPickerProps> = ({
   onBoundaryChange,
   initialGeoJSON,
@@ -106,6 +130,10 @@ const LeafletMapPicker: React.FC<LeafletMapPickerProps> = ({
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [isLocating, setIsLocating] = useState(false);
+  const searchMarkerRef = useRef<L.Marker | null>(null);
+  const userMarkerRef = useRef<L.CircleMarker | null>(null);
+  const accuracyCircleRef = useRef<L.Circle | null>(null);
 
   const triggerToast = useCallback(
     (msg: string, type: "success" | "info" | "warning" = "info") => {
@@ -297,33 +325,200 @@ const LeafletMapPicker: React.FC<LeafletMapPickerProps> = ({
   );
 
   // ---------------------------------------------------------------------------
-  // Search
+  // 1. Photon Geocoder with Regional Coordinate Bias
   // ---------------------------------------------------------------------------
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!searchQuery.trim()) return;
+    const query = searchQuery.trim();
+    if (!query) return;
 
     setIsSearching(true);
     setSearchError(null);
-    try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}`);
-      const data = await res.json();
-      if (data && data.length > 0) {
-        const { lat, lon } = data[0];
+
+    // 1. Direct coordinate pattern detection
+    const coordMatch = query.match(/^([+-]?\d+(?:\.\d+)?)[,\s]+([+-]?\d+(?:\.\d+)?)$/);
+    if (coordMatch) {
+      const lat = parseFloat(coordMatch[1]);
+      const lng = parseFloat(coordMatch[2]);
+      if (!isNaN(lat) && !isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+        setIsSearching(false);
         if (mapRef.current) {
-          mapRef.current.setView([parseFloat(lat), parseFloat(lon)], 15);
+          mapRef.current.setView([lat, lng], 18, { animate: true });
+          if (searchMarkerRef.current) {
+            mapRef.current.removeLayer(searchMarkerRef.current);
+          }
+          searchMarkerRef.current = L.marker([lat, lng], {
+            icon: createSearchPinIcon(`Coordinates (${lat.toFixed(4)}, ${lng.toFixed(4)})`),
+            interactive: false,
+          }).addTo(mapRef.current);
         }
         setSearchQuery("");
-        triggerToast("Location found", "success");
-      } else {
-        setSearchError("Location not found.");
+        triggerToast(`Centered on coordinates (${lat.toFixed(4)}, ${lng.toFixed(4)})`, "success");
+        return;
       }
-    } catch {
-      setSearchError("Failed to search location.");
-    } finally {
-      setIsSearching(false);
     }
+
+    // 2. Primary: Photon Geocoder with regional coordinate bias
+    try {
+      const center = mapRef.current?.getCenter?.();
+      const biasLat = center?.lat ?? REGIONAL_BIAS_LAT;
+      const biasLng = center?.lng ?? REGIONAL_BIAS_LNG;
+
+      const res = await fetch(
+        `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&lat=${biasLat}&lon=${biasLng}&limit=6`
+      );
+      const data = await res.json();
+      if (data?.features && Array.isArray(data.features) && data.features.length > 0) {
+        const first = data.features[0];
+        const lat = Number(first.geometry.coordinates[1]);
+        const lng = Number(first.geometry.coordinates[0]);
+        if (!isNaN(lat) && !isNaN(lng)) {
+          const props = first.properties || {};
+          const parts = [
+            props.name,
+            props.district || props.county || props.city,
+            props.state,
+          ].filter(Boolean);
+          const name = parts.join(", ") || props.name || query;
+
+          if (mapRef.current) {
+            mapRef.current.setView([lat, lng], 18, { animate: true });
+            if (searchMarkerRef.current) {
+              mapRef.current.removeLayer(searchMarkerRef.current);
+            }
+            searchMarkerRef.current = L.marker([lat, lng], {
+              icon: createSearchPinIcon(name),
+              interactive: false,
+            }).addTo(mapRef.current);
+          }
+          setSearchQuery("");
+          setIsSearching(false);
+          triggerToast(`Found: ${name}`, "success");
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("[Search] Photon lookup failed, trying backup geocoder:", err);
+    }
+
+    // 3. Fallback: Nominatim OpenStreetMap (Restricted to India)
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+          query
+        )}&countrycodes=in&addressdetails=1&limit=5`
+      );
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const lat = parseFloat(data[0].lat);
+        const lng = parseFloat(data[0].lon);
+        if (!isNaN(lat) && !isNaN(lng)) {
+          const name = data[0].display_name.split(",")[0] || query;
+          if (mapRef.current) {
+            mapRef.current.setView([lat, lng], 18, { animate: true });
+            if (searchMarkerRef.current) {
+              mapRef.current.removeLayer(searchMarkerRef.current);
+            }
+            searchMarkerRef.current = L.marker([lat, lng], {
+              icon: createSearchPinIcon(name),
+              interactive: false,
+            }).addTo(mapRef.current);
+          }
+          setSearchQuery("");
+          setIsSearching(false);
+          triggerToast(`Found: ${name}`, "success");
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("[Search] Nominatim backup failed:", err);
+    }
+
+    setIsSearching(false);
+    setSearchError(`Location "${query}" not found. Try searching a nearby village or town (e.g. Khammam, Eluru, Pedavegi).`);
   };
+
+  // ---------------------------------------------------------------------------
+  // 2. HTML5 Geolocation Device GPS
+  // ---------------------------------------------------------------------------
+  const handleUseCurrentLocation = useCallback(() => {
+    if (!navigator.geolocation) {
+      const err = "Geolocation is not supported by your browser or device.";
+      console.warn("[GPS]", err);
+      setSearchError("Geolocation not supported. Please search your village manually.");
+      triggerToast("Geolocation not supported. Please use the search bar.", "warning");
+      return;
+    }
+
+    setIsLocating(true);
+    setSearchError(null);
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setIsLocating(false);
+        const { latitude, longitude, accuracy } = pos.coords;
+        if (isNaN(latitude) || isNaN(longitude)) {
+          setSearchError("GPS returned invalid coordinates. Please search your village manually.");
+          return;
+        }
+
+        if (mapRef.current) {
+          mapRef.current.setView([latitude, longitude], 18, { animate: true });
+
+          if (accuracyCircleRef.current) {
+            mapRef.current.removeLayer(accuracyCircleRef.current);
+          }
+          accuracyCircleRef.current = L.circle([latitude, longitude], {
+            radius: Math.max(accuracy, 10),
+            color: accuracy > 100 ? "#f59e0b" : "#3b82f6",
+            fillColor: accuracy > 100 ? "#f59e0b" : "#3b82f6",
+            fillOpacity: 0.15,
+            weight: 1.5,
+            interactive: false,
+          }).addTo(mapRef.current);
+
+          if (userMarkerRef.current) {
+            mapRef.current.removeLayer(userMarkerRef.current);
+          }
+          userMarkerRef.current = L.circleMarker([latitude, longitude], {
+            radius: 8,
+            color: "#ffffff",
+            fillColor: accuracy > 100 ? "#f59e0b" : "#2563eb",
+            fillOpacity: 1,
+            weight: 2.5,
+            interactive: false,
+          }).addTo(mapRef.current);
+        }
+        triggerToast(`Location acquired (±${Math.round(accuracy)}m).`, "success");
+      },
+      (err) => {
+        setIsLocating(false);
+        console.warn(
+          `[GPS] Geolocation failed (code ${err.code}: ${err.message}). ` +
+          "Desktop/localhost browsers often fail or timeout if precise hardware GPS is unavailable. " +
+          "User guided to manual village/mandal search."
+        );
+
+        let userMsg = "Could not obtain device location. Please search your village or mandal manually above.";
+        if (err.code === err.PERMISSION_DENIED) {
+          userMsg = "Location permission denied. Please allow location access or search your village/mandal above.";
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          userMsg = "GPS position unavailable on this device. Please type your village, mandal, or district above.";
+        } else if (err.code === err.TIMEOUT) {
+          userMsg = "GPS request timed out. On desktop environments, please use the search bar above.";
+        }
+
+        // NO SILENT FALLBACK to DEFAULT_CENTER or hardcoded location!
+        setSearchError(userMsg);
+        triggerToast(userMsg, "warning");
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0,
+      }
+    );
+  }, [triggerToast]);
 
   const areaDisplay =
     areaAcres !== null
@@ -358,31 +553,48 @@ const LeafletMapPicker: React.FC<LeafletMapPickerProps> = ({
         </button>
       </div>
 
-      {/* Location Search Bar */}
-      <div className="flex items-center bg-gray-50 border border-gray-200 rounded-xl overflow-hidden shadow-xs h-[38px] focus-within:border-emerald-500 focus-within:ring-1 focus-within:ring-emerald-500">
-        <div className="pl-3 text-gray-400">
-          <Search className="w-4 h-4" />
+      {/* Location Search Bar + GPS */}
+      <div className="flex items-center gap-1.5">
+        <div className="flex-1 flex items-center bg-gray-50 border border-gray-200 rounded-xl overflow-hidden shadow-xs h-[38px] focus-within:border-emerald-500 focus-within:ring-1 focus-within:ring-emerald-500">
+          <div className="pl-3 text-gray-400">
+            <Search className="w-4 h-4" />
+          </div>
+          <input
+            type="text"
+            placeholder="Search village, mandal, or district..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleSearch();
+              }
+            }}
+            className="bg-transparent border-none text-xs text-gray-800 px-2.5 py-1.5 w-full focus:outline-none placeholder:text-gray-400 font-semibold"
+          />
+          <button
+            type="button"
+            onClick={handleSearch}
+            disabled={isSearching || !searchQuery.trim()}
+            className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-200 disabled:text-gray-400 text-white px-3.5 h-full text-xs font-bold transition-all cursor-pointer shrink-0"
+          >
+            {isSearching ? <RefreshCw className="w-3.5 h-3.5 animate-spin mx-auto" /> : "Find"}
+          </button>
         </div>
-        <input
-          type="text"
-          placeholder="Search village, mandal, or district..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              handleSearch();
-            }
-          }}
-          className="bg-transparent border-none text-xs text-gray-800 px-2.5 py-1.5 w-full focus:outline-none placeholder:text-gray-400 font-semibold"
-        />
+
         <button
           type="button"
-          onClick={handleSearch}
-          disabled={isSearching || !searchQuery.trim()}
-          className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-200 disabled:text-gray-400 text-white px-3.5 h-full text-xs font-bold transition-all cursor-pointer shrink-0"
+          onClick={handleUseCurrentLocation}
+          disabled={isLocating}
+          title="Locate via device GPS"
+          className="h-[38px] px-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer shrink-0 border-0"
         >
-          {isSearching ? <RefreshCw className="w-3.5 h-3.5 animate-spin mx-auto" /> : "Find"}
+          {isLocating ? (
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <Navigation className="w-3.5 h-3.5" />
+          )}
+          <span className="hidden sm:inline">{isLocating ? "Locating…" : "GPS"}</span>
         </button>
       </div>
 
