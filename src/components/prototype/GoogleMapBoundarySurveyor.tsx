@@ -1,15 +1,22 @@
 /**
  * GoogleMapBoundarySurveyor.tsx
  *
- * Full-Screen Google Maps Farm Boundary Surveyor
- * Redesigned for a precise, intuitive 4-step farmer workflow:
- * 1. FIND FARM       (Search village/town/area with live suggestions OR Use Current GPS)
- * 2. DRAW BOUNDARY   (Prominent CTA, tap farm corners on satellite imagery)
- * 3. ADJUST BOUNDARY (Drag vertices, Undo, Clear with confirm, live edge lengths)
- * 4. CONFIRM & SAVE  (Area + Perimeter summary, validation, emit standard GeoJSON)
+ * Full-Screen Google Maps & Satellite Farm Plot Creation Dashboard & GIS Toolkit
  *
- * Primary Provider: Official Google Maps JavaScript API (Satellite / Hybrid).
- * Fallback Provider: High-Resolution Satellite Engine (Esri World Imagery).
+ * Architecture:
+ * 1. FIXED VIEWPORT CONTAINER (z-[99999]): True full-screen layout.
+ * 2. TOP NAVIGATION BAR (z-[1000]): Location search, Satellite/Road toggle, Zoom, My Location GPS.
+ * 3. DEDICATED SIDE TOOLKIT PANEL (aside):
+ *    - Rendered in a separate layout container (flex-row on desktop), NEVER underneath map tiles.
+ *    - Pencil/Draw Tool button with live status.
+ *    - Retake / Undo button (removes last placed vertex).
+ *    - Clear All button (resets boundary).
+ *    - Dropdowns: Irrigation Method & Soil Classification.
+ *    - Live Area (Acres/Ha) & Perimeter measurements.
+ *    - Primary "Create Plot" submission button.
+ * 4. MAP CANVAS (main): Full remaining viewport width, high-res Google Maps satellite with
+ *    keyless Esri World Imagery fallback, smooth zoom/pan, click-to-draw.
+ * 5. API CONFIGURATION MODAL: Solid backdrop (z-[100000]) preventing DOM flickers or map reloads.
  */
 
 import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
@@ -23,7 +30,6 @@ import {
   Trash2,
   Undo2,
   Search,
-  Crosshair,
   AlertTriangle,
   ZoomIn,
   ZoomOut,
@@ -31,13 +37,18 @@ import {
   Key,
   RefreshCw,
   HelpCircle,
-  Ruler,
   Globe2,
   Edit3,
-  CheckCircle2,
-  ChevronRight,
   ArrowLeft,
   Sparkles,
+  Maximize2,
+  Droplets,
+  Layers,
+  Sprout,
+  Calendar,
+  ChevronDown,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import {
   computePolygonAreaAcres,
@@ -49,15 +60,27 @@ import {
 import {
   loadGoogleMaps,
   setGoogleMapsApiKeyOverride,
+  getGoogleMapsApiKey,
 } from "../../lib/googleMapsLoader";
 
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 
+export interface PlotCreationMetadata {
+  name: string;
+  farmer: string;
+  crop: string;
+  soilType: string;
+  irrigation: string;
+  plantingDate?: string;
+  plantCount?: string;
+}
+
 export interface BoundaryData {
   geoJSON: GeoJSONPolygon;
   areaAcres: number;
   centroid: { lat: number; lng: number } | null;
+  metadata?: PlotCreationMetadata;
 }
 
 export interface GoogleMapBoundarySurveyorProps {
@@ -65,7 +88,9 @@ export interface GoogleMapBoundarySurveyorProps {
   onClose: () => void;
   onConfirm: (data: BoundaryData) => void;
   initialGeoJSON?: GeoJSONPolygon;
+  initialMetadata?: Partial<PlotCreationMetadata>;
   plotName?: string;
+  mode?: "create" | "survey_only";
   defaultAreaUnit?: "acres" | "hectares";
   showToast?: (msg: string, type?: "success" | "info" | "warning") => void;
 }
@@ -73,17 +98,66 @@ export interface GoogleMapBoundarySurveyorProps {
 const DEFAULT_CENTER = { lat: 17.3912, lng: 78.4948 }; // Andhra Pradesh / Telangana Oil Palm Belt
 const DEFAULT_FARM_ZOOM = 18;
 
-// Popular agricultural presets for one-tap locating
-const QUICK_LOCATIONS = [
-  { name: "Khammam", lat: 17.2473, lng: 80.1514, desc: "Telangana Oil Palm Belt" },
-  { name: "Eluru", lat: 16.7107, lng: 81.0952, desc: "Andhra Pradesh Palm Belt" },
-  { name: "Pedavegi", lat: 16.8083, lng: 81.1274, desc: "West Godavari ICAR-IIOPR" },
-  { name: "Chintalapudi", lat: 17.0673, lng: 80.9983, desc: "Eluru District" },
-  { name: "Kothagudem", lat: 17.5521, lng: 80.6186, desc: "Bhadradri District" },
-  { name: "Suryapet", lat: 17.1439, lng: 79.6239, desc: "Telangana" },
-];
+// Regional coordinate bias (Karnataka / Andhra Pradesh / Telangana Southern India zone)
+const REGIONAL_BIAS_LAT = 12.9716;
+const REGIONAL_BIAS_LNG = 77.5946;
 
-type SurveyStep = "find" | "draw" | "adjust" | "confirm";
+// Fix Leaflet default marker icon asset paths in Vite / browser bundlers
+delete (L.Icon.Default.prototype as any)._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+});
+
+// Custom SVG map marker for searched locations (non-interactive so clicking directly adds vertices)
+const createSearchPinIcon = (placeName: string) =>
+  L.divIcon({
+    className: "custom-leaflet-search-pin",
+    html: `
+      <div style="position: relative; display: flex; flex-direction: column; align-items: center; transform: translate(-50%, -100%); pointer-events: none;">
+        <div style="background-color: #0f172a; color: #10b981; border: 1.5px solid #10b981; font-weight: 700; font-size: 11px; padding: 2px 8px; border-radius: 6px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); white-space: nowrap; margin-bottom: 2px;">
+          ${placeName}
+        </div>
+        <svg width="26" height="34" viewBox="0 0 24 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 0C5.37258 0 0 5.37258 0 12C0 20.25 12 32 12 32C12 32 24 20.25 24 12C24 5.37258 18.6274 0 12 0Z" fill="#10b981"/>
+          <circle cx="12" cy="12" r="4.5" fill="#ffffff"/>
+        </svg>
+      </div>
+    `,
+    iconSize: [0, 0],
+    iconAnchor: [0, 0],
+  });
+
+
+interface QuickLocation {
+  name: string;
+  state: string;
+  lat: number;
+  lng: number;
+}
+
+// Popular agricultural presets for one-tap locating
+const QUICK_LOCATIONS: QuickLocation[] = [
+  { name: "Khammam", state: "Telangana", lat: 17.2473, lng: 80.1514 },
+  { name: "Eluru", state: "Andhra Pradesh", lat: 16.7107, lng: 81.0952 },
+  { name: "Pedavegi", state: "Andhra Pradesh", lat: 16.8083, lng: 81.1274 },
+  { name: "Chintalapudi", state: "Andhra Pradesh", lat: 17.0673, lng: 80.9983 },
+  { name: "Kothagudem", state: "Telangana", lat: 17.5521, lng: 80.6186 },
+  { name: "Jangareddygudem", state: "Andhra Pradesh", lat: 17.1265, lng: 81.2917 },
+  { name: "Rajahmundry", state: "Andhra Pradesh", lat: 17.0005, lng: 81.8040 },
+  { name: "Vijayawada", state: "Andhra Pradesh", lat: 16.5062, lng: 80.6480 },
+  { name: "Guntur", state: "Andhra Pradesh", lat: 16.3067, lng: 80.4365 },
+  { name: "Warangal", state: "Telangana", lat: 17.9689, lng: 79.5941 },
+  { name: "Nalgonda", state: "Telangana", lat: 17.0575, lng: 79.2684 },
+  { name: "Shimoga", state: "Karnataka", lat: 13.9299, lng: 75.5681 },
+  { name: "Bhadravathi", state: "Karnataka", lat: 13.8427, lng: 75.7032 },
+  { name: "Davanagere", state: "Karnataka", lat: 14.4644, lng: 75.9218 },
+  { name: "Udupi", state: "Karnataka", lat: 13.3409, lng: 74.7421 },
+  { name: "Mysore", state: "Karnataka", lat: 12.2958, lng: 76.6394 },
+  { name: "Hyderabad", state: "Telangana", lat: 17.3850, lng: 78.4867 },
+  { name: "Bengaluru", state: "Karnataka", lat: 12.9716, lng: 77.5946 },
+];
 
 interface SearchSuggestion {
   displayName: string;
@@ -111,7 +185,9 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   onClose,
   onConfirm,
   initialGeoJSON,
-  plotName = "Farm Plot",
+  initialMetadata,
+  plotName = "New Farm Plot",
+  mode = "create",
   defaultAreaUnit = "acres",
   showToast,
 }) => {
@@ -125,7 +201,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   const googleAccuracyCircleRef = useRef<any>(null);
   const googleUserMarkerRef = useRef<any>(null);
   const googleSearchMarkerRef = useRef<any>(null);
-  const googlePlacesAutocompleteRef = useRef<any>(null);
+  const isSyncingGooglePathRef = useRef<boolean>(false);
 
   // Leaflet Fallback Refs
   const leafletMapRef = useRef<L.Map | null>(null);
@@ -135,29 +211,45 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   const leafletAccuracyCircleRef = useRef<L.Circle | null>(null);
   const leafletUserMarkerRef = useRef<L.CircleMarker | L.Marker | null>(null);
   const leafletSearchMarkerRef = useRef<L.Marker | null>(null);
+  const leafletSatLayerRef = useRef<L.TileLayer | null>(null);
+  const leafletRoadLayerRef = useRef<L.TileLayer | null>(null);
+  const searchDebounceRef = useRef<any>(null);
 
-  // Geolocation Multi-Reading Watch Refs
-  const watchIdRef = useRef<number | null>(null);
-  const watchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const bestPositionRef = useRef<GeolocationPosition | null>(null);
-  const readingsCountRef = useRef<number>(0);
+  // Drawing & Plot Creation State
+  const [isDrawingActive, setIsDrawingActive] = useState(true);
+  const [activeEngine, setActiveEngine] = useState<"google" | "satellite_fallback">(() =>
+    getGoogleMapsApiKey() ? "google" : "satellite_fallback"
+  );
+  const activeEngineRef = useRef<"google" | "satellite_fallback">(
+    getGoogleMapsApiKey() ? "google" : "satellite_fallback"
+  );
+  activeEngineRef.current = activeEngine;
 
-  // State Machine: Step 1 (find), Step 2 (draw), Step 3 (adjust), Step 4 (confirm)
-  const [currentStep, setCurrentStep] = useState<SurveyStep>("find");
-  const [isDrawingActive, setIsDrawingActive] = useState(false);
+  const mapTypeRef = useRef<"hybrid" | "roadmap" | "satellite">("hybrid");
+  const pendingCenterRef = useRef<{ lat: number; lng: number; name: string; zoom: number } | null>(null);
 
-  // General States
-  const [activeEngine, setActiveEngine] = useState<"google" | "satellite_fallback">("google");
   const [areaUnit, setAreaUnit] = useState<"acres" | "hectares">(defaultAreaUnit);
   const [mapType, setMapType] = useState<"hybrid" | "roadmap" | "satellite">("hybrid");
   const [vertices, setVertices] = useState<Array<{ lat: number; lng: number }>>([]);
   const [areaAcres, setAreaAcres] = useState<number | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [showMoreFields, setShowMoreFields] = useState(false);
 
-  // GPS Geolocation States (Honest, Real Geolocation API with accuracy tracking, zero caching)
+  // Form Metadata State
+  const [plotFormData, setPlotFormData] = useState<PlotCreationMetadata>({
+    name: initialMetadata?.name || (mode === "create" ? "" : plotName),
+    farmer: initialMetadata?.farmer || "Swaminathan Gowda",
+    crop: initialMetadata?.crop || "Oil Palm",
+    soilType: initialMetadata?.soilType || "Loamy",
+    irrigation: initialMetadata?.irrigation || "Precision Drip",
+    plantingDate: initialMetadata?.plantingDate || "",
+    plantCount: initialMetadata?.plantCount || "",
+  });
+
+  // GPS Geolocation States
   const [isLocating, setIsLocating] = useState(false);
   const [gpsAccuracyM, setGpsAccuracyM] = useState<number | null>(null);
-  const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number; accuracy: number; timestamp: number } | null>(null);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [gpsWarning, setGpsWarning] = useState<string | null>(null);
 
@@ -166,7 +258,6 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   const [isSearching, setIsSearching] = useState(false);
   const [searchSuggestions, setSearchSuggestions] = useState<SearchSuggestion[]>([]);
   const [showSuggestionsDropdown, setShowSuggestionsDropdown] = useState(false);
-  const [locationFoundNotice, setLocationFoundNotice] = useState<string | null>(null);
 
   // Modals & UI States
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -175,7 +266,6 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   const [tempApiKey, setTempApiKey] = useState("");
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [showHelpGuide, setShowHelpGuide] = useState(false);
-  const [showConfirmModal, setShowConfirmModal] = useState(false);
 
   const triggerToast = useCallback(
     (msg: string, type: "success" | "info" | "warning" = "info") => {
@@ -248,7 +338,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
     async (coords: Array<{ lat: number; lng: number }>) => {
       if (coords.length < 3) {
         setAreaAcres(null);
-        setValidationError(coords.length > 0 ? "Place at least 3 points to form a closed farm boundary." : null);
+        setValidationError(coords.length > 0 ? "Place at least 3 points to form a closed boundary." : null);
         return;
       }
 
@@ -278,7 +368,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
   );
 
   // ---------------------------------------------------------------------------
-  // Leaflet Satellite Fallback Engine
+  // Leaflet Satellite Fallback Engine: Polygon & Vertex Layers
   // ---------------------------------------------------------------------------
   const renderLeafletPolygon = useCallback(
     (pts: Array<{ lat: number; lng: number }>) => {
@@ -294,7 +384,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         if (leafletPolylineRef.current) leafletPolylineRef.current.setLatLngs(latLngs);
       }
 
-      // Add draggable vertex markers
+      // Add draggable vertex markers with visual feedback
       pts.forEach((pt, idx) => {
         const marker = L.circleMarker([pt.lat, pt.lng], {
           radius: 8,
@@ -304,16 +394,23 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           weight: 2.5,
         });
 
-        marker.on("mousedown", () => {
+        marker.on("mousedown touchstart", () => {
           if (!leafletMapRef.current) return;
           leafletMapRef.current.dragging.disable();
-          const onMouseMove = (e: L.LeafletMouseEvent) => {
+
+          const onMouseMove = (e: any) => {
             const newPts = [...verticesRef.current];
-            newPts[idx] = { lat: e.latlng.lat, lng: e.latlng.lng };
-            setVertices(newPts);
-            renderLeafletPolygon(newPts);
-            recalculateGeometry(newPts);
+            const lat = e.latlng?.lat ?? (e.touches ? e.touches[0].clientY : 0);
+            const lng = e.latlng?.lng ?? (e.touches ? e.touches[0].clientX : 0);
+            if (e.latlng) {
+              newPts[idx] = { lat, lng };
+              verticesRef.current = newPts;
+              setVertices(newPts);
+              renderLeafletPolygon(newPts);
+              recalculateGeometry(newPts);
+            }
           };
+
           const onMouseUp = () => {
             if (leafletMapRef.current) {
               leafletMapRef.current.dragging.enable();
@@ -321,6 +418,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
               leafletMapRef.current.off("mouseup", onMouseUp);
             }
           };
+
           leafletMapRef.current.on("mousemove", onMouseMove);
           leafletMapRef.current.on("mouseup", onMouseUp);
         });
@@ -331,97 +429,203 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
     [recalculateGeometry]
   );
 
-  const initLeafletFallback = useCallback(
-    (coords: Array<{ lat: number; lng: number }>) => {
-      if (!mapContainerRef.current) return;
-      if (leafletMapRef.current) {
-        leafletMapRef.current.remove();
-        leafletMapRef.current = null;
-      }
+  // ---------------------------------------------------------------------------
+  // Core: Add Vertex Handler (Called on map/canvas tap or click)
+  // ---------------------------------------------------------------------------
+  const handleAddVertex = useCallback(
+    (lat: number, lng: number) => {
+      setVertices((prev) => {
+        const updated = [...prev, { lat, lng }];
+        verticesRef.current = updated;
 
-      let center: [number, number] = [DEFAULT_CENTER.lat, DEFAULT_CENTER.lng];
-      let zoom = DEFAULT_FARM_ZOOM;
+        // Sync with Google Maps layers
+        if (googlePolygonRef.current && window.google?.maps) {
+          isSyncingGooglePathRef.current = true;
+          const latLng = new window.google.maps.LatLng(lat, lng);
 
-      if (coords.length > 0) {
-        center = [coords[0].lat, coords[0].lng];
-      }
+          const path = googlePolygonRef.current.getPath();
+          path.push(latLng);
 
-      const map = L.map(mapContainerRef.current, {
-        center,
-        zoom,
-        zoomControl: false,
-        attributionControl: false,
-      });
-
-      // High-resolution satellite tiles
-      const satLayer = L.tileLayer(
-        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        { maxZoom: 19 }
-      );
-      satLayer.addTo(map);
-
-      const markersGroup = L.layerGroup().addTo(map);
-      leafletMarkersGroupRef.current = markersGroup;
-
-      const polygon = L.polygon([], {
-        color: "#10b981",
-        fillColor: "#10b981",
-        fillOpacity: 0.3,
-        weight: 3,
-      }).addTo(map);
-      leafletPolygonRef.current = polygon;
-
-      const polyline = L.polyline([], {
-        color: "#34d399",
-        weight: 2.5,
-        dashArray: "4, 6",
-      }).addTo(map);
-      leafletPolylineRef.current = polyline;
-
-      map.on("click", (e: L.LeafletMouseEvent) => {
-        if (!isDrawingActiveRef.current) return;
-        const lat = e.latlng.lat;
-        const lng = e.latlng.lng;
-        setVertices((prev) => {
-          const updated = [...prev, { lat, lng }];
-          renderLeafletPolygon(updated);
-          recalculateGeometry(updated);
-          if (updated.length >= 3) {
-            setCurrentStep("adjust");
-          } else {
-            setCurrentStep("draw");
+          if (updated.length < 3 && googlePolylineRef.current) {
+            googlePolylineRef.current.setPath(path);
+            googlePolygonRef.current.setVisible(false);
+          } else if (updated.length >= 3) {
+            googlePolygonRef.current.setVisible(true);
+            if (googlePolylineRef.current) googlePolylineRef.current.setPath([]);
           }
-          return updated;
-        });
+          isSyncingGooglePathRef.current = false;
+        }
+
+        // Sync with Leaflet fallback layers
+        if (leafletMapRef.current) {
+          renderLeafletPolygon(updated);
+        }
+
+        recalculateGeometry(updated);
+        return updated;
       });
-
-      if (coords.length >= 3) {
-        renderLeafletPolygon(coords);
-        const bounds = L.latLngBounds(coords.map((c) => [c.lat, c.lng]));
-        map.fitBounds(bounds, { padding: [60, 60], maxZoom: 19 });
-        setCurrentStep("adjust");
-        setIsDrawingActive(false);
-      } else {
-        setCurrentStep("find");
-        setIsDrawingActive(false);
-      }
-
-      leafletMapRef.current = map;
-      setActiveEngine("satellite_fallback");
-      setIsLoadingMaps(false);
     },
     [renderLeafletPolygon, recalculateGeometry]
   );
 
   // ---------------------------------------------------------------------------
-  // Move Map to Location Helper (Works on both Google Maps and Leaflet)
+  // Initialize Leaflet Fallback Engine (Robust against React re-renders)
+  // ---------------------------------------------------------------------------
+  const initLeafletFallback = useCallback(
+    (coords: Array<{ lat: number; lng: number }> = []) => {
+      if (!mapContainerRef.current) return;
+
+      // Safely remove existing Leaflet instance if present
+      if (leafletMapRef.current) {
+        try {
+          leafletMapRef.current.remove();
+        } catch (err) {
+          console.warn("[Leaflet] Previous map cleanup error:", err);
+        }
+        leafletMapRef.current = null;
+      }
+
+      // Crucial: Leaflet caches container references via _leaflet_id.
+      // Must be cleared so React remounts do not throw "Map container is already initialized."
+      if ((mapContainerRef.current as any)._leaflet_id) {
+        delete (mapContainerRef.current as any)._leaflet_id;
+      }
+      mapContainerRef.current.innerHTML = "";
+
+      let center: [number, number] = [DEFAULT_CENTER.lat, DEFAULT_CENTER.lng];
+      let zoom = DEFAULT_FARM_ZOOM;
+
+      if (pendingCenterRef.current) {
+        center = [pendingCenterRef.current.lat, pendingCenterRef.current.lng];
+        zoom = pendingCenterRef.current.zoom;
+      } else if (coords.length > 0) {
+        center = [coords[0].lat, coords[0].lng];
+      }
+
+      try {
+        const map = L.map(mapContainerRef.current, {
+          center,
+          zoom,
+          zoomControl: false,
+          attributionControl: false,
+          doubleClickZoom: false,
+          preferCanvas: true,
+        });
+
+        // 1. High-resolution satellite tiles (Esri World Imagery)
+        const satLayer = L.tileLayer(
+          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+          { maxZoom: 19, attribution: "© Esri, Maxar, Earthstar" }
+        );
+        leafletSatLayerRef.current = satLayer;
+
+        // 2. OpenStreetMap Standard / Road tiles
+        const roadLayer = L.tileLayer(
+          "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+          { maxZoom: 19, attribution: "© OpenStreetMap contributors" }
+        );
+        leafletRoadLayerRef.current = roadLayer;
+
+        // Add appropriate basemap layer based on current selection
+        if (mapTypeRef.current === "roadmap") {
+          roadLayer.addTo(map);
+        } else {
+          satLayer.addTo(map);
+        }
+
+        const markersGroup = L.layerGroup().addTo(map);
+        leafletMarkersGroupRef.current = markersGroup;
+
+        const polygon = L.polygon([], {
+          color: "#10b981",
+          fillColor: "#10b981",
+          fillOpacity: 0.35,
+          weight: 3,
+          interactive: true,
+        }).addTo(map);
+        leafletPolygonRef.current = polygon;
+
+        const polyline = L.polyline([], {
+          color: "#34d399",
+          weight: 2.5,
+          dashArray: "4, 6",
+          interactive: false,
+        }).addTo(map);
+        leafletPolylineRef.current = polyline;
+
+        const onMapClick = (e: L.LeafletMouseEvent) => {
+          if (!isDrawingActiveRef.current) {
+            setIsDrawingActive(true);
+          }
+          handleAddVertex(e.latlng.lat, e.latlng.lng);
+        };
+
+        map.on("click", onMapClick);
+        polygon.on("click", onMapClick);
+
+        if (coords.length >= 3) {
+          renderLeafletPolygon(coords);
+          const bounds = L.latLngBounds(coords.map((c) => [c.lat, c.lng]));
+          map.fitBounds(bounds, { padding: [60, 60], maxZoom: 19 });
+          setIsDrawingActive(false);
+        } else {
+          setIsDrawingActive(true);
+        }
+
+        // Apply pending location pin if any
+        if (pendingCenterRef.current) {
+          const { lat, lng, name, zoom: targetZoom } = pendingCenterRef.current;
+          map.setView([lat, lng], targetZoom);
+          if (leafletSearchMarkerRef.current) {
+            map.removeLayer(leafletSearchMarkerRef.current);
+          }
+          leafletSearchMarkerRef.current = L.marker([lat, lng], {
+            icon: createSearchPinIcon(name),
+            title: name,
+            interactive: false,
+          }).addTo(map);
+          pendingCenterRef.current = null;
+        }
+
+        leafletMapRef.current = map;
+        setActiveEngine("satellite_fallback");
+        setIsLoadingMaps(false);
+
+        setTimeout(() => {
+          map.invalidateSize();
+        }, 100);
+        setTimeout(() => {
+          map.invalidateSize();
+        }, 350);
+      } catch (err) {
+        console.error("[Leaflet] Initialization error:", err);
+        setIsLoadingMaps(false);
+      }
+    },
+    [renderLeafletPolygon, handleAddVertex]
+  );
+
+  // ---------------------------------------------------------------------------
+  // Move Map to Location Helper (Works reliably on whichever engine is mounted)
   // ---------------------------------------------------------------------------
   const navigateMapToCoordinates = useCallback(
     (lat: number, lng: number, placeName: string, zoomLevel = 18) => {
-      setLocationFoundNotice(`📍 Located: ${placeName}`);
       setShowSuggestionsDropdown(false);
+      setGpsError(null);
+      pendingCenterRef.current = { lat, lng, name: placeName, zoom: zoomLevel };
 
-      if (activeEngine === "google" && googleMapRef.current && window.google?.maps) {
+      if (leafletMapRef.current) {
+        leafletMapRef.current.setView([lat, lng], zoomLevel, { animate: true });
+        if (leafletSearchMarkerRef.current) {
+          leafletMapRef.current.removeLayer(leafletSearchMarkerRef.current);
+        }
+        leafletSearchMarkerRef.current = L.marker([lat, lng], {
+          icon: createSearchPinIcon(placeName),
+          title: placeName,
+          interactive: false,
+        }).addTo(leafletMapRef.current);
+        pendingCenterRef.current = null;
+      } else if (googleMapRef.current && window.google?.maps) {
         const latLng = new window.google.maps.LatLng(lat, lng);
         googleMapRef.current.panTo(latLng);
         googleMapRef.current.setZoom(zoomLevel);
@@ -443,18 +647,18 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
             strokeWeight: 2,
           },
           zIndex: 8,
+          clickable: false,
         });
-      } else if (leafletMapRef.current) {
-        leafletMapRef.current.setView([lat, lng], zoomLevel);
-        if (leafletSearchMarkerRef.current) {
-          leafletMapRef.current.removeLayer(leafletSearchMarkerRef.current);
-        }
-        leafletSearchMarkerRef.current = L.marker([lat, lng]).addTo(leafletMapRef.current);
+        pendingCenterRef.current = null;
+      } else {
+        // Map engine was not yet mounted, force initialize Leaflet fallback at these coordinates
+        console.info("[Navigation] Map not ready yet, booting Leaflet at:", lat, lng);
+        initLeafletFallback([{ lat, lng }]);
       }
 
-      triggerToast(`Centered on: ${placeName}. Tap 'Draw Farm Boundary' when ready.`, "success");
+      triggerToast(`Centered on: ${placeName}. Tap on map to trace corners.`, "success");
     },
-    [activeEngine, triggerToast]
+    [triggerToast, initLeafletFallback]
   );
 
   // ---------------------------------------------------------------------------
@@ -467,9 +671,16 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
       setMapsLoadError(null);
 
       const initialCoords = getInitialCoordinates();
+      const apiKey = keyOverride || getGoogleMapsApiKey();
+
+      // Zero-cost open-source Leaflet is primary when no Google Maps API key is configured
+      if (!apiKey) {
+        initLeafletFallback(initialCoords);
+        return;
+      }
 
       try {
-        const google = await loadGoogleMaps(keyOverride);
+        const google = await loadGoogleMaps(apiKey);
         if (!mapContainerRef.current) return;
 
         let center = DEFAULT_CENTER;
@@ -491,6 +702,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           zoomControl: false,
           gestureHandling: "greedy",
           clickableIcons: false,
+          disableDoubleClickZoom: true,
           maxZoom: 21,
           minZoom: 3,
         });
@@ -503,9 +715,10 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           strokeOpacity: 0.95,
           strokeWeight: 3,
           fillColor: "#10b981",
-          fillOpacity: 0.3,
-          editable: true,
+          fillOpacity: 0.35,
+          editable: false,
           draggable: false,
+          clickable: true,
           zIndex: 10,
         });
         polygon.setMap(map);
@@ -514,58 +727,46 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         // In-progress polyline for 1-2 points
         const polyline = new google.maps.Polyline({
           strokeColor: "#34d399",
-          strokeOpacity: 0.9,
+          strokeOpacity: 0.95,
           strokeWeight: 2.5,
           map: map,
+          clickable: false,
           zIndex: 9,
         });
         googlePolylineRef.current = polyline;
 
-        const updateFromPath = () => {
+        // Synchronize manual vertex drags back to state
+        const updateFromPolygonPath = () => {
+          if (isSyncingGooglePathRef.current) return;
           const currentPath = polygon.getPath();
           const newCoords: Array<{ lat: number; lng: number }> = [];
           for (let i = 0; i < currentPath.getLength(); i++) {
             const pt = currentPath.getAt(i);
             newCoords.push({ lat: pt.lat(), lng: pt.lng() });
           }
+          verticesRef.current = newCoords;
           setVertices(newCoords);
-          if (newCoords.length >= 3) {
-            polyline.setPath([]);
-            setCurrentStep("adjust");
-          }
           recalculateGeometry(newCoords);
         };
 
         const path = polygon.getPath();
-        path.addListener("set_at", updateFromPath);
-        path.addListener("insert_at", updateFromPath);
-        path.addListener("remove_at", updateFromPath);
+        path.addListener("set_at", updateFromPolygonPath);
+        path.addListener("insert_at", updateFromPolygonPath);
+        path.addListener("remove_at", updateFromPolygonPath);
 
-        // Map Click Listener
-        map.addListener("click", (e: any) => {
+        // Click on Map to Drop Vertex
+        const onGoogleMapClick = (e: any) => {
           if (!e.latLng) return;
-          if (!isDrawingActiveRef.current) return;
+          if (!isDrawingActiveRef.current) {
+            setIsDrawingActive(true);
+          }
+          handleAddVertex(e.latLng.lat(), e.latLng.lng());
+        };
 
-          const lat = e.latLng.lat();
-          const lng = e.latLng.lng();
+        map.addListener("click", onGoogleMapClick);
+        polygon.addListener("click", onGoogleMapClick);
 
-          setVertices((prev) => {
-            const updated = [...prev, { lat, lng }];
-            const mvcPath = polygon.getPath();
-            mvcPath.push(e.latLng);
-            if (updated.length < 3) {
-              polyline.setPath(mvcPath);
-              setCurrentStep("draw");
-            } else {
-              polyline.setPath([]);
-              setCurrentStep("adjust");
-            }
-            recalculateGeometry(updated);
-            return updated;
-          });
-        });
-
-        // Initialize Places Autocomplete if available with India bias
+        // Initialize Places Autocomplete if available
         if (google.maps.places && searchInputRef.current) {
           try {
             const autocomplete = new google.maps.places.Autocomplete(searchInputRef.current, {
@@ -584,7 +785,6 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
                 navigateMapToCoordinates(lat, lng, name, 18);
               }
             });
-            googlePlacesAutocompleteRef.current = autocomplete;
           } catch (e) {
             console.warn("Places autocomplete init bypassed:", e);
           }
@@ -592,6 +792,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
 
         // Handle initial GeoJSON geometry if existing plot
         if (initialCoords.length >= 3) {
+          isSyncingGooglePathRef.current = true;
           const mvcPath = polygon.getPath();
           mvcPath.clear();
           const bounds = new google.maps.LatLngBounds();
@@ -602,12 +803,15 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           });
           map.fitBounds(bounds, { top: 80, right: 80, bottom: 80, left: 80 });
           setVertices(initialCoords);
+          verticesRef.current = initialCoords;
+          polygon.setEditable(true);
+          polygon.setVisible(true);
+          isSyncingGooglePathRef.current = false;
+
           recalculateGeometry(initialCoords);
-          setCurrentStep("adjust");
           setIsDrawingActive(false);
         } else {
-          setCurrentStep("find");
-          setIsDrawingActive(false);
+          setIsDrawingActive(true);
         }
 
         setActiveEngine("google");
@@ -615,44 +819,57 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
       } catch (err: any) {
         console.warn("Google Maps JS API did not load:", err?.message);
         setMapsLoadError(err?.message || "Google Maps API key required");
-        // Fall back gracefully to the high-resolution satellite engine so farmer is never blocked
+        // Fall back gracefully to keyless satellite engine
         initLeafletFallback(initialCoords);
       }
     },
-    [getInitialCoordinates, recalculateGeometry, initLeafletFallback, navigateMapToCoordinates]
+    [getInitialCoordinates, recalculateGeometry, initLeafletFallback, navigateMapToCoordinates, handleAddVertex]
   );
 
-  // Helper to stop active GPS watch & clear timeout
-  const stopGpsWatch = useCallback(() => {
-    if (watchIdRef.current !== null && navigator.geolocation) {
-      navigator.geolocation.clearWatch(watchIdRef.current);
-      watchIdRef.current = null;
+  // Sync editable state on Google Maps polygon when toggling drawing mode
+  useEffect(() => {
+    if (activeEngine === "google" && googlePolygonRef.current) {
+      if (isDrawingActive) {
+        googlePolygonRef.current.setEditable(false);
+      } else if (vertices.length >= 3) {
+        googlePolygonRef.current.setEditable(true);
+      }
     }
-    if (watchTimeoutRef.current !== null) {
-      clearTimeout(watchTimeoutRef.current);
-      watchTimeoutRef.current = null;
-    }
-  }, []);
+  }, [isDrawingActive, activeEngine, vertices.length]);
+
+  // Invalidate map size on sidebar toggle
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (activeEngine === "google" && googleMapRef.current && window.google?.maps) {
+        window.google.maps.event.trigger(googleMapRef.current, "resize");
+      } else if (leafletMapRef.current) {
+        leafletMapRef.current.invalidateSize();
+      }
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [isSidebarOpen, activeEngine]);
 
   // ---------------------------------------------------------------------------
-  // Lifecycle Hook
+  // Lifecycle Hook (Guaranteed single initialization per modal open session)
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (isOpen) {
+    if (!isOpen) return;
+
+    // Small delay ensures portal DOM is mounted and dimensions are set
+    const timer = setTimeout(() => {
       const initialCoords = getInitialCoordinates();
       setVertices(initialCoords);
+      verticesRef.current = initialCoords;
       if (initialCoords.length >= 3) {
-        setCurrentStep("adjust");
         setIsDrawingActive(false);
       } else {
-        setCurrentStep("find");
-        setIsDrawingActive(false);
+        setIsDrawingActive(true);
       }
       initGoogleMaps();
-    }
+    }, 50);
 
     return () => {
-      stopGpsWatch();
+      clearTimeout(timer);
       if (googlePolygonRef.current) {
         googlePolygonRef.current.setMap(null);
         googlePolygonRef.current = null;
@@ -674,12 +891,22 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         googleSearchMarkerRef.current = null;
       }
       if (leafletMapRef.current) {
-        leafletMapRef.current.remove();
+        try {
+          leafletMapRef.current.remove();
+        } catch (err) {
+          console.warn("[Leaflet] Cleanup error:", err);
+        }
         leafletMapRef.current = null;
+      }
+      if (mapContainerRef.current) {
+        if ((mapContainerRef.current as any)._leaflet_id) {
+          delete (mapContainerRef.current as any)._leaflet_id;
+        }
+        mapContainerRef.current.innerHTML = "";
       }
       googleMapRef.current = null;
     };
-  }, [isOpen, initGoogleMaps, getInitialCoordinates, stopGpsWatch]);
+  }, [isOpen]);
 
   // Keyboard Shortcuts (Escape to close, Ctrl+Z to undo)
   useEffect(() => {
@@ -689,8 +916,6 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
       if (e.key === "Escape") {
         if (showClearConfirm) {
           setShowClearConfirm(false);
-        } else if (showConfirmModal) {
-          setShowConfirmModal(false);
         } else if (showKeyModal) {
           setShowKeyModal(false);
         } else if (showHelpGuide) {
@@ -706,14 +931,17 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, showClearConfirm, showConfirmModal, showKeyModal, showHelpGuide, onClose]);
+  }, [isOpen, showClearConfirm, showKeyModal, showHelpGuide, onClose]);
 
   // ---------------------------------------------------------------------------
-  // Basemap Switcher
+  // Basemap Switcher (Satellite vs Road/OSM on both Google and Leaflet)
   // ---------------------------------------------------------------------------
   const handleBasemapChange = (type: "hybrid" | "roadmap" | "satellite") => {
     setMapType(type);
-    if (activeEngine === "google" && googleMapRef.current && window.google?.maps) {
+    mapTypeRef.current = type;
+
+    // 1. Google Maps Engine
+    if (googleMapRef.current && window.google?.maps) {
       if (type === "hybrid") {
         googleMapRef.current.setMapTypeId(window.google.maps.MapTypeId.HYBRID);
       } else if (type === "satellite") {
@@ -722,45 +950,48 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         googleMapRef.current.setMapTypeId(window.google.maps.MapTypeId.ROADMAP);
       }
     }
+
+    // 2. Leaflet Fallback Engine (Esri Satellite vs OpenStreetMap Road)
+    if (leafletMapRef.current) {
+      if (type === "roadmap") {
+        if (leafletSatLayerRef.current && leafletMapRef.current.hasLayer(leafletSatLayerRef.current)) {
+          leafletMapRef.current.removeLayer(leafletSatLayerRef.current);
+        }
+        if (leafletRoadLayerRef.current && !leafletMapRef.current.hasLayer(leafletRoadLayerRef.current)) {
+          leafletRoadLayerRef.current.addTo(leafletMapRef.current);
+        }
+      } else {
+        if (leafletRoadLayerRef.current && leafletMapRef.current.hasLayer(leafletRoadLayerRef.current)) {
+          leafletMapRef.current.removeLayer(leafletRoadLayerRef.current);
+        }
+        if (leafletSatLayerRef.current && !leafletMapRef.current.hasLayer(leafletSatLayerRef.current)) {
+          leafletSatLayerRef.current.addTo(leafletMapRef.current);
+        }
+      }
+    }
   };
 
-  const formattedLocationTime = useMemo(() => {
-    if (!currentLocation?.timestamp) return null;
-    return new Date(currentLocation.timestamp).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  }, [currentLocation]);
-
-  // Helper to apply a location fix to map overlays
+  // ---------------------------------------------------------------------------
+  // Geolocation Application Helper
+  // ---------------------------------------------------------------------------
   const applyLocationFix = useCallback(
-    (pos: GeolocationPosition) => {
+    (latitude: number, longitude: number, accuracy: number) => {
       setIsLocating(false);
-      const { latitude, longitude, accuracy } = pos.coords;
-      const timestamp = pos.timestamp || Date.now();
-
-      setCurrentLocation({ lat: latitude, lng: longitude, accuracy, timestamp });
       setGpsAccuracyM(accuracy);
 
-      // Determine zoom level according to reported accuracy
-      let zoom = 19;
-      if (accuracy > 500) {
-        zoom = 15;
-      } else if (accuracy > 150) {
-        zoom = 17;
-      } else if (accuracy > 30) {
-        zoom = 18;
-      } else {
-        zoom = 19;
-      }
+      let zoom = 18;
+      if (accuracy > 1000) zoom = 14;
+      else if (accuracy > 300) zoom = 16;
+      else if (accuracy > 50) zoom = 17;
+      else zoom = 18;
 
-      if (activeEngine === "google" && googleMapRef.current && window.google?.maps) {
+      pendingCenterRef.current = { lat: latitude, lng: longitude, name: "My Location", zoom };
+
+      if (googleMapRef.current && window.google?.maps) {
         const latLng = new window.google.maps.LatLng(latitude, longitude);
         googleMapRef.current.panTo(latLng);
         googleMapRef.current.setZoom(zoom);
 
-        // Clear previous accuracy circle & marker
         if (googleAccuracyCircleRef.current) {
           googleAccuracyCircleRef.current.setMap(null);
         }
@@ -779,8 +1010,6 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         if (googleUserMarkerRef.current) {
           googleUserMarkerRef.current.setMap(null);
         }
-
-        // Exact location Blue Dot marker
         googleUserMarkerRef.current = new window.google.maps.Marker({
           position: latLng,
           map: googleMapRef.current,
@@ -795,17 +1024,19 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           },
           zIndex: 6,
         });
+        pendingCenterRef.current = null;
       } else if (leafletMapRef.current) {
-        leafletMapRef.current.setView([latitude, longitude], zoom);
+        leafletMapRef.current.setView([latitude, longitude], zoom, { animate: true });
         if (leafletAccuracyCircleRef.current) {
           leafletMapRef.current.removeLayer(leafletAccuracyCircleRef.current);
         }
         leafletAccuracyCircleRef.current = L.circle([latitude, longitude], {
-          radius: accuracy,
+          radius: Math.max(accuracy, 10),
           color: accuracy > 100 ? "#f59e0b" : "#3b82f6",
           fillColor: accuracy > 100 ? "#f59e0b" : "#3b82f6",
           fillOpacity: 0.15,
           weight: 1.5,
+          interactive: false,
         }).addTo(leafletMapRef.current);
 
         if (leafletUserMarkerRef.current) {
@@ -817,311 +1048,333 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
           fillColor: accuracy > 100 ? "#f59e0b" : "#2563eb",
           fillOpacity: 1,
           weight: 2.5,
+          interactive: false,
         }).addTo(leafletMapRef.current);
+        pendingCenterRef.current = null;
+      } else {
+        console.info("[GPS] Map engine not initialized yet, booting Leaflet at GPS fix:", latitude, longitude);
+        initLeafletFallback([{ lat: latitude, lng: longitude }]);
       }
 
-      // Accuracy evaluation
-      if (accuracy > 100) {
-        setGpsWarning(
-          "Your location accuracy is low. Move outdoors or enable device location services and try again."
-        );
-        triggerToast(
-          `Low accuracy (±${Math.round(accuracy)} m). Move outdoors or search your village name above.`,
-          "warning"
-        );
+      if (accuracy > 1500) {
+        setGpsWarning(`Broad network position (±${Math.round(accuracy)}m). If this is not your exact field, search your village name above or use quick jump.`);
+        triggerToast(`Network location fixed (±${Math.round(accuracy)}m). If inaccurate, type your village in search.`, "warning");
       } else {
         setGpsWarning(null);
-        triggerToast(
-          `Location acquired (±${Math.round(accuracy)} m). Move to your farm and tap Draw Boundary.`,
-          "success"
-        );
+        triggerToast(`Precise location acquired (±${Math.round(accuracy)}m). Centered on your position.`, "success");
       }
     },
-    [activeEngine, triggerToast]
+    [triggerToast, initLeafletFallback]
   );
 
   // ---------------------------------------------------------------------------
-  // 1. FIND FARM: Geolocation Handler (Multi-Reading Watch Flow, Zero Stale Caching)
+  // 1. FIND FARM: Resilient HTML5 Geolocation Handler (High Accuracy, No Silent Fallback)
   // ---------------------------------------------------------------------------
   const handleUseCurrentLocation = useCallback(() => {
-    // 1. Cancel any active watch or timeout before starting a fresh acquisition
-    stopGpsWatch();
-
     if (!navigator.geolocation) {
       const err = "Geolocation is not supported by your browser or device.";
-      setGpsError(err);
-      triggerToast(err, "warning");
+      console.warn("[GPS] navigator.geolocation not available in this browser environment.");
+      setGpsError(`${err} Please use the village search bar above to locate your farm.`);
+      triggerToast("Geolocation not supported. Please use the search bar above.", "warning");
       return;
     }
 
-    // 2. Clear previous location overlays immediately so no stale visual state remains
-    if (googleAccuracyCircleRef.current) {
-      googleAccuracyCircleRef.current.setMap(null);
-      googleAccuracyCircleRef.current = null;
-    }
-    if (googleUserMarkerRef.current) {
-      googleUserMarkerRef.current.setMap(null);
-      googleUserMarkerRef.current = null;
-    }
-    if (leafletAccuracyCircleRef.current && leafletMapRef.current) {
-      leafletMapRef.current.removeLayer(leafletAccuracyCircleRef.current);
-      leafletAccuracyCircleRef.current = null;
-    }
-    if (leafletUserMarkerRef.current && leafletMapRef.current) {
-      leafletMapRef.current.removeLayer(leafletUserMarkerRef.current);
-      leafletUserMarkerRef.current = null;
-    }
-
-    // 3. Reset state for completely fresh multi-reading acquisition
     setIsLocating(true);
     setGpsError(null);
     setGpsWarning(null);
-    bestPositionRef.current = null;
-    readingsCountRef.current = 0;
 
-    const finishAcquisition = () => {
-      stopGpsWatch();
-      if (bestPositionRef.current) {
-        applyLocationFix(bestPositionRef.current);
-      } else {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
         setIsLocating(false);
-        setGpsError("Your device could not determine an accurate location. Try again outdoors.");
-      }
-    };
+        const { latitude, longitude, accuracy } = pos.coords;
 
-    // 4. Acquisition window timeout (~10 seconds): finalize with the best reading collected
-    watchTimeoutRef.current = setTimeout(() => {
-      if (import.meta.env?.DEV) {
-        console.debug(
-          "[Geolocation] 10-second acquisition window expired. Selecting best reading collected:",
-          bestPositionRef.current
-            ? {
-                latitude: bestPositionRef.current.coords.latitude,
-                longitude: bestPositionRef.current.coords.longitude,
-                accuracy: bestPositionRef.current.coords.accuracy,
-                timestamp: bestPositionRef.current.timestamp,
-              }
-            : "No reading received"
-        );
-      }
-      finishAcquisition();
-    }, 10000);
-
-    // 5. Start watchPosition to collect multiple fresh readings and pick the best accuracy
-    try {
-      const watchId = navigator.geolocation.watchPosition(
-        (pos) => {
-          readingsCountRef.current += 1;
-          const { latitude, longitude, accuracy } = pos.coords;
-          const timestamp = pos.timestamp || Date.now();
-
-          // Development-only console.debug output for each reading
-          if (import.meta.env?.DEV) {
-            console.debug(
-              `[Geolocation reading #${readingsCountRef.current}]`,
-              `latitude: ${latitude}, longitude: ${longitude}, accuracy: ±${Math.round(accuracy)}m, timestamp: ${new Date(timestamp).toISOString()}`
-            );
-          }
-
-          // Select the reading with the best/smallest coords.accuracy
-          if (!bestPositionRef.current || accuracy < bestPositionRef.current.coords.accuracy) {
-            bestPositionRef.current = pos;
-          }
-
-          // Stop watch once accuracy <= 30m (high-accuracy GPS fix achieved)
-          if (accuracy <= 30) {
-            if (import.meta.env?.DEV) {
-              console.debug(
-                `[Geolocation] High-accuracy fix reached (±${Math.round(accuracy)}m <= 30m) on reading #${readingsCountRef.current}. Finalizing acquisition.`
-              );
-            }
-            finishAcquisition();
-          }
-        },
-        (err) => {
-          // If we already collected at least one reading, don't fail immediately; let timeout apply the best reading
-          if (bestPositionRef.current) {
-            return;
-          }
-
-          stopGpsWatch();
-          setIsLocating(false);
-          setGpsAccuracyM(null);
-          let msg = "Could not obtain your current location. Please try again.";
-          if (err.code === err.PERMISSION_DENIED) {
-            msg = "Location permission was denied. Allow location access in your browser and try again.";
-          } else if (err.code === err.POSITION_UNAVAILABLE) {
-            msg = "Your device could not determine an accurate location. Try again outdoors.";
-          } else if (err.code === err.TIMEOUT) {
-            msg = "Location request timed out. Try again.";
-          }
-          setGpsError(msg);
-          triggerToast(msg, "warning");
-        },
-        {
-          enableHighAccuracy: true,
-          maximumAge: 0,
-          timeout: 10000,
+        if (isNaN(latitude) || isNaN(longitude)) {
+          console.warn("[GPS] Geolocation returned NaN coordinates:", pos.coords);
+          setGpsError("GPS returned invalid coordinates. Please search your village manually.");
+          triggerToast("Invalid GPS fix. Please use manual search.", "warning");
+          return;
         }
-      );
-      watchIdRef.current = watchId;
-    } catch {
-      stopGpsWatch();
-      setIsLocating(false);
-      setGpsError("Could not start geolocation watch.");
-    }
-  }, [stopGpsWatch, applyLocationFix, triggerToast]);
+
+        console.info(
+          `[GPS] Location fix acquired: lat=${latitude.toFixed(6)}, lng=${longitude.toFixed(6)}, accuracy=±${Math.round(accuracy)}m`
+        );
+        applyLocationFix(latitude, longitude, accuracy);
+      },
+      (err) => {
+        setIsLocating(false);
+        console.warn(
+          `[GPS] Geolocation failed (code ${err.code}: ${err.message}). ` +
+          "Desktop browsers and localhost environments without dedicated GPS hardware often fail or timeout. " +
+          "Guiding user to manual search bar."
+        );
+
+        let userMsg = "Could not obtain device location. Please search your village or mandal manually above.";
+        if (err.code === err.PERMISSION_DENIED) {
+          userMsg = "Location permission denied. Please allow location access in browser settings or use the search bar above to find your farm.";
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          userMsg = "GPS position unavailable on this device. Please type your village, mandal, or district in the search bar above.";
+        } else if (err.code === err.TIMEOUT) {
+          userMsg = "GPS request timed out. If on desktop/laptop without dedicated GPS, please use the search bar above to find your village.";
+        }
+
+        // CRUCIAL: Remove silent fallback to hardcoded wrong location!
+        setGpsError(userMsg);
+        triggerToast(userMsg, "warning");
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0,
+      }
+    );
+  }, [applyLocationFix, triggerToast]);
 
   // ---------------------------------------------------------------------------
-  // 1. FIND FARM: Live Search Input Changes & Geocoding Resolver
+  // 1. FIND FARM: Live Search Input Changes & Photon API Autocomplete
   // ---------------------------------------------------------------------------
-  const handleSearchInputChange = async (val: string) => {
+  const handleSearchInputChange = (val: string) => {
     setSearchQuery(val);
-    if (!val.trim() || val.trim().length < 2) {
+    const trimmed = val.trim();
+    if (!trimmed || trimmed.length < 2) {
       setSearchSuggestions([]);
       setShowSuggestionsDropdown(false);
       return;
     }
 
-    try {
-      // Prioritize India by searching with countrycodes=in
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-          val.trim()
-        )}&countrycodes=in&addressdetails=1&limit=5`
-      );
-      const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
-        const formatted: SearchSuggestion[] = data.map((d: any) => ({
-          displayName: d.display_name,
-          lat: parseFloat(d.lat),
-          lng: parseFloat(d.lon),
-          type: d.type,
-        }));
-        setSearchSuggestions(formatted);
-        setShowSuggestionsDropdown(true);
-      } else {
-        setSearchSuggestions([]);
-      }
-    } catch {
-      // Ignore background suggestion network errors
+    // 1. Immediate local matching from agricultural index (0ms response)
+    const lower = trimmed.toLowerCase();
+    const localMatches: SearchSuggestion[] = QUICK_LOCATIONS.filter((l) =>
+      l.name.toLowerCase().includes(lower) || (l.state && l.state.toLowerCase().includes(lower))
+    ).map((l) => ({
+      displayName: `${l.name}, ${l.state || "India"}`,
+      lat: l.lat,
+      lng: l.lng,
+      type: "agricultural_hub",
+    }));
+
+    setSearchSuggestions(localMatches);
+    if (localMatches.length > 0) {
+      setShowSuggestionsDropdown(true);
     }
+
+    // 2. Debounced remote lookup using Photon API with regional coordinate bias
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+    }
+
+    searchDebounceRef.current = setTimeout(async () => {
+      try {
+        const center = leafletMapRef.current?.getCenter?.();
+        const biasLat = center?.lat ?? REGIONAL_BIAS_LAT;
+        const biasLng = center?.lng ?? REGIONAL_BIAS_LNG;
+
+        // Photon Geocoder (Komoot - fast, browser CORS enabled, OpenStreetMap data) with regional bias
+        let res = await fetch(
+          `https://photon.komoot.io/api/?q=${encodeURIComponent(trimmed)}&lat=${biasLat}&lon=${biasLng}&limit=8`
+        );
+        let data = await res.json();
+
+        // If no results, retry with ", India" to ensure local villages match
+        if (!data?.features || data.features.length === 0) {
+          res = await fetch(
+            `https://photon.komoot.io/api/?q=${encodeURIComponent(trimmed + ", India")}&lat=${biasLat}&lon=${biasLng}&limit=8`
+          );
+          data = await res.json();
+        }
+
+        if (data?.features && Array.isArray(data.features) && data.features.length > 0) {
+          const remoteMatches: SearchSuggestion[] = data.features.map((f: any) => {
+            const props = f.properties || {};
+            const parts = [
+              props.name,
+              props.district || props.county || props.city,
+              props.state,
+              props.country,
+            ].filter(Boolean);
+            return {
+              displayName: parts.join(", ") || props.name || "Location",
+              lat: Number(f.geometry.coordinates[1]),
+              lng: Number(f.geometry.coordinates[0]),
+              type: props.osm_value || props.type,
+            };
+          }).filter((m: SearchSuggestion) => !isNaN(m.lat) && !isNaN(m.lng));
+
+          setSearchSuggestions(() => {
+            const list = [...localMatches];
+            for (const r of remoteMatches) {
+              if (!list.some((existing) => Math.abs(existing.lat - r.lat) < 0.005 && Math.abs(existing.lng - r.lng) < 0.005)) {
+                list.push(r);
+              }
+            }
+            return list.slice(0, 8);
+          });
+          setShowSuggestionsDropdown(true);
+          return;
+        }
+      } catch (err) {
+        console.warn("[Search] Photon autocomplete lookup failed:", err);
+        // Fall back to Nominatim with India countrycode restriction
+        try {
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+              trimmed
+            )}&countrycodes=in&addressdetails=1&limit=5`
+          );
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            const remoteMatches: SearchSuggestion[] = data.map((d: any) => ({
+              displayName: d.display_name,
+              lat: parseFloat(d.lat),
+              lng: parseFloat(d.lon),
+              type: d.type,
+            })).filter((m: SearchSuggestion) => !isNaN(m.lat) && !isNaN(m.lng));
+
+            setSearchSuggestions(() => {
+              const list = [...localMatches];
+              for (const r of remoteMatches) {
+                if (!list.some((existing) => Math.abs(existing.lat - r.lat) < 0.005 && Math.abs(existing.lng - r.lng) < 0.005)) {
+                  list.push(r);
+                }
+              }
+              return list.slice(0, 8);
+            });
+            setShowSuggestionsDropdown(true);
+          }
+        } catch {
+          // Keep local matches if offline
+        }
+      }
+    }, 280);
   };
 
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!searchQuery.trim()) return;
+    const query = searchQuery.trim();
+    if (!query) return;
 
     setIsSearching(true);
     setGpsError(null);
     setShowSuggestionsDropdown(false);
 
-    // Try Google Maps Geocoder if Google is active
-    if (activeEngine === "google" && window.google?.maps?.Geocoder) {
-      try {
-        const geocoder = new window.google.maps.Geocoder();
-        geocoder.geocode(
-          { address: searchQuery.trim(), componentRestrictions: { country: "IN" } },
-          (results: any, status: any) => {
-            setIsSearching(false);
-            if (status === "OK" && results && results[0]) {
-              const loc = results[0].geometry.location;
-              navigateMapToCoordinates(loc.lat(), loc.lng(), results[0].formatted_address.split(",")[0], 18);
-            } else {
-              // Try unconstrained Google Geocoder or fallback to Nominatim
-              geocoder.geocode({ address: searchQuery.trim() }, (r2: any, s2: any) => {
-                if (s2 === "OK" && r2 && r2[0]) {
-                  const loc2 = r2[0].geometry.location;
-                  navigateMapToCoordinates(loc2.lat(), loc2.lng(), r2[0].formatted_address.split(",")[0], 18);
-                } else {
-                  fallbackOsmSearch(searchQuery.trim());
-                }
-              });
-            }
-          }
-        );
+    // 1. Direct coordinate pattern detection (e.g. "17.2473, 80.1514" or "17.2473 80.1514")
+    const coordMatch = query.match(/^([+-]?\d+(?:\.\d+)?)[,\s]+([+-]?\d+(?:\.\d+)?)$/);
+    if (coordMatch) {
+      const lat = parseFloat(coordMatch[1]);
+      const lng = parseFloat(coordMatch[2]);
+      if (!isNaN(lat) && !isNaN(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+        setIsSearching(false);
+        navigateMapToCoordinates(lat, lng, `Coordinates (${lat.toFixed(4)}, ${lng.toFixed(4)})`, 18);
         return;
-      } catch {
-        // Fall back to OSM Nominatim
       }
     }
 
-    fallbackOsmSearch(searchQuery.trim());
-  };
+    // 2. Direct local agricultural preset lookup
+    const lower = query.toLowerCase();
+    const localMatch = QUICK_LOCATIONS.find((l) =>
+      l.name.toLowerCase() === lower || lower.includes(l.name.toLowerCase())
+    );
+    if (localMatch) {
+      setIsSearching(false);
+      navigateMapToCoordinates(localMatch.lat, localMatch.lng, localMatch.name, 18);
+      return;
+    }
 
-  const fallbackOsmSearch = async (query: string) => {
+    // 3. Primary: Photon Geocoder (Komoot - 100% free open-source OSM geocoder)
+    // Add regional coordinate bias (lat=12.9716, lon=77.5946 near Karnataka/India)
     try {
-      // Try with countrycodes=in first
+      const center = leafletMapRef.current?.getCenter?.();
+      const biasLat = center?.lat ?? REGIONAL_BIAS_LAT;
+      const biasLng = center?.lng ?? REGIONAL_BIAS_LNG;
+
       let res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-          query
-        )}&countrycodes=in&addressdetails=1&limit=5`
+        `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&lat=${biasLat}&lon=${biasLng}&limit=6`
       );
       let data = await res.json();
 
-      // If nothing found, try global search
-      if (!data || data.length === 0) {
+      // If no results for raw input, append ", India" to ensure local Indian villages/mandals resolve
+      if (!data?.features || data.features.length === 0) {
         res = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-            query
-          )}&limit=5`
+          `https://photon.komoot.io/api/?q=${encodeURIComponent(query + ", India")}&lat=${biasLat}&lon=${biasLng}&limit=6`
         );
         data = await res.json();
       }
 
-      if (data && data.length > 0) {
-        const lat = parseFloat(data[0].lat);
-        const lon = parseFloat(data[0].lon);
-        const name = data[0].display_name.split(",")[0];
-        navigateMapToCoordinates(lat, lon, name, 18);
-      } else {
-        triggerToast("Location not found. Try entering a nearby town or mandal name.", "warning");
+      if (data?.features && Array.isArray(data.features) && data.features.length > 0) {
+        const first = data.features[0];
+        const lat = Number(first.geometry.coordinates[1]);
+        const lng = Number(first.geometry.coordinates[0]);
+        if (!isNaN(lat) && !isNaN(lng)) {
+          const props = first.properties || {};
+          const parts = [
+            props.name,
+            props.district || props.county || props.city,
+            props.state,
+          ].filter(Boolean);
+          const name = parts.join(", ") || props.name || query;
+          setIsSearching(false);
+          navigateMapToCoordinates(lat, lng, name, 18);
+          return;
+        }
       }
-    } catch {
-      triggerToast("Search connection failed. Please check internet connection.", "warning");
-    } finally {
-      setIsSearching(false);
+    } catch (err) {
+      console.warn("[Search] Photon lookup failed, trying backup geocoder:", err);
     }
+
+    // 4. Fallback: Nominatim OpenStreetMap (Restricted to India)
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+          query
+        )}&countrycodes=in&addressdetails=1&limit=5`
+      );
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const lat = parseFloat(data[0].lat);
+        const lng = parseFloat(data[0].lon);
+        if (!isNaN(lat) && !isNaN(lng)) {
+          const name = data[0].display_name.split(",")[0] || query;
+          setIsSearching(false);
+          navigateMapToCoordinates(lat, lng, name, 18);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("[Search] Nominatim fallback failed:", err);
+    }
+
+    setIsSearching(false);
+    triggerToast(`Location "${query}" not found. Try searching a nearby town (e.g. Khammam, Eluru, Pedavegi) or choose from the list below.`, "warning");
   };
 
   // ---------------------------------------------------------------------------
-  // 2. START DRAWING: Transition to Drawing Mode
-  // ---------------------------------------------------------------------------
-  const handleStartDrawing = () => {
-    setIsDrawingActive(true);
-    setCurrentStep(vertices.length >= 3 ? "adjust" : "draw");
-    triggerToast("Drawing Mode Active! Click on the satellite map to add boundary points.", "info");
-  };
-
-  // ---------------------------------------------------------------------------
-  // 3. ADJUST BOUNDARY: Undo, Clear & Edit
+  // 3. ADJUST BOUNDARY: Undo & Clear
   // ---------------------------------------------------------------------------
   const handleUndo = () => {
     if (vertices.length === 0) return;
     const updated = vertices.slice(0, -1);
     setVertices(updated);
+    verticesRef.current = updated;
 
     if (activeEngine === "google" && googlePolygonRef.current) {
+      isSyncingGooglePathRef.current = true;
       const mvcPath = googlePolygonRef.current.getPath();
       mvcPath.pop();
       if (googlePolylineRef.current) {
         if (updated.length < 3) {
           googlePolylineRef.current.setPath(mvcPath);
+          googlePolygonRef.current.setVisible(false);
         } else {
           googlePolylineRef.current.setPath([]);
+          googlePolygonRef.current.setVisible(true);
         }
       }
+      isSyncingGooglePathRef.current = false;
     } else if (leafletMapRef.current) {
       renderLeafletPolygon(updated);
     }
 
-    if (updated.length >= 3) {
-      setCurrentStep("adjust");
-    } else if (updated.length > 0) {
-      setCurrentStep("draw");
-    } else {
-      setCurrentStep("find");
-      setIsDrawingActive(false);
+    if (updated.length < 3) {
+      setIsDrawingActive(true);
     }
 
     recalculateGeometry(updated);
@@ -1129,28 +1382,36 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
 
   const handleClear = () => {
     setVertices([]);
+    verticesRef.current = [];
     setAreaAcres(null);
     setValidationError(null);
     setShowClearConfirm(false);
 
     if (activeEngine === "google" && googlePolygonRef.current) {
+      isSyncingGooglePathRef.current = true;
       googlePolygonRef.current.getPath().clear();
+      googlePolygonRef.current.setVisible(false);
       if (googlePolylineRef.current) googlePolylineRef.current.setPath([]);
+      isSyncingGooglePathRef.current = false;
     } else if (leafletMapRef.current && leafletPolygonRef.current) {
       leafletPolygonRef.current.setLatLngs([]);
       if (leafletPolylineRef.current) leafletPolylineRef.current.setLatLngs([]);
       leafletMarkersGroupRef.current?.clearLayers();
     }
 
-    setCurrentStep("find");
-    setIsDrawingActive(false);
-    triggerToast("Boundary cleared.", "info");
+    setIsDrawingActive(true);
+    triggerToast("Boundary cleared. Tap on the satellite map to start fresh.", "info");
   };
 
   // ---------------------------------------------------------------------------
-  // 4. CONFIRM & SAVE: Emit Valid GeoJSON to Wizard
+  // 4. SUBMIT: Finalize & Create Plot
   // ---------------------------------------------------------------------------
-  const handleConfirm = async () => {
+  const handleSubmitPlot = async () => {
+    if (!plotFormData.name.trim()) {
+      triggerToast("Please enter a Plot Name.", "warning");
+      return;
+    }
+
     if (vertices.length < 3) {
       triggerToast("Please place at least 3 points around the farm boundary.", "warning");
       return;
@@ -1178,461 +1439,205 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
       geoJSON,
       areaAcres: calculatedAcres,
       centroid,
+      metadata: plotFormData,
     });
-    setShowConfirmModal(false);
     onClose();
+  };
+
+  // Recenter map to fit current drawn boundary or location
+  const handleFitBounds = () => {
+    if (vertices.length > 0) {
+      if (activeEngine === "google" && googleMapRef.current && window.google?.maps) {
+        const bounds = new window.google.maps.LatLngBounds();
+        vertices.forEach((v) => bounds.extend(new window.google.maps.LatLng(v.lat, v.lng)));
+        googleMapRef.current.fitBounds(bounds, 80);
+      } else if (leafletMapRef.current) {
+        const bounds = L.latLngBounds(vertices.map((v) => [v.lat, v.lng]));
+        leafletMapRef.current.fitBounds(bounds, { padding: [60, 60] });
+      }
+    } else if (googleMapRef.current) {
+      googleMapRef.current.panTo(DEFAULT_CENTER);
+      googleMapRef.current.setZoom(16);
+    } else if (leafletMapRef.current) {
+      leafletMapRef.current.setView([DEFAULT_CENTER.lat, DEFAULT_CENTER.lng], 16);
+    }
   };
 
   if (!isOpen) return null;
 
   return createPortal(
     <div className="fixed inset-0 z-[99999] w-screen h-screen bg-slate-950 text-white flex flex-col overflow-hidden font-sans select-none top-0 left-0 right-0 bottom-0">
-      {/* Dynamic Styling for Google Places Autocomplete dropdown */}
-      <style>{`
-        .pac-container {
-          z-index: 100001 !important;
-          background-color: #0f172a !important;
-          border: 1px solid #334155 !important;
-          border-radius: 14px !important;
-          margin-top: 6px !important;
-          box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6) !important;
-          font-family: inherit !important;
-          overflow: hidden !important;
-        }
-        .pac-item {
-          color: #e2e8f0 !important;
-          border-top: 1px solid #1e293b !important;
-          padding: 10px 14px !important;
-          cursor: pointer !important;
-          font-size: 13px !important;
-        }
-        .pac-item:hover, .pac-item-selected {
-          background-color: #1e293b !important;
-        }
-        .pac-item-query {
-          color: #38bdf8 !important;
-          font-weight: 700 !important;
-          font-size: 13px !important;
-        }
-        .pac-matched {
-          font-weight: 800 !important;
-          color: #10b981 !important;
-        }
-        .pac-icon {
-          filter: invert(1) hue-rotate(180deg) !important;
-        }
-      `}</style>
-
-      {/* ================= 1. Top Navigation & Search Bar ================= */}
-      <header className="bg-slate-900/95 backdrop-blur-md border-b border-slate-800 px-4 py-2.5 flex items-center justify-between gap-3 shrink-0 z-30 shadow-lg relative">
-        {/* Left: Close & Plot Name */}
-        <div className="flex items-center gap-3">
+      {/* ================= 1. TOP NAVIGATION BAR (z-[1000]) ================= */}
+      <header className="bg-slate-900 border-b border-slate-800 px-3 sm:px-4 py-2.5 flex items-center justify-between gap-3 shrink-0 z-[1000] shadow-md relative">
+        {/* Left: Back / Close & Mode Title */}
+        <div className="flex items-center gap-2.5 shrink-0">
           <button
             type="button"
             onClick={onClose}
             className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-all cursor-pointer border border-slate-700 flex items-center gap-1.5 text-xs font-bold"
-            title="Return to plot management"
+            title="Return to Farm Plot Management"
           >
             <ArrowLeft className="w-4 h-4 text-slate-300" />
             <span className="hidden sm:inline">Back</span>
           </button>
 
+          <button
+            type="button"
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-all cursor-pointer border border-slate-700 flex items-center gap-1.5 text-xs font-bold"
+            title={isSidebarOpen ? "Collapse Side Toolkit" : "Expand Side Toolkit"}
+          >
+            {isSidebarOpen ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeftOpen className="w-4 h-4" />}
+            <span className="hidden sm:inline text-[11px]">{isSidebarOpen ? "Sidebar" : "Show Sidebar"}</span>
+          </button>
+
           <div className="flex flex-col">
-            <div className="flex items-center gap-2">
-              <span className="font-black text-sm text-white tracking-tight">{plotName}</span>
+            <span className="font-black text-xs sm:text-sm text-white tracking-tight truncate max-w-[130px] sm:max-w-[220px]">
+              {mode === "create" ? "Plot Creation Workspace" : plotName}
+            </span>
+            <div className="flex items-center gap-1.5">
               {activeEngine === "google" ? (
-                <span className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] font-black px-2 py-0.5 rounded-md uppercase tracking-wider flex items-center gap-1">
+                <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                   Google Maps Satellite
                 </span>
               ) : (
-                <span className="bg-blue-500/20 text-blue-300 border border-blue-500/30 text-[9px] font-black px-2 py-0.5 rounded-md uppercase tracking-wider flex items-center gap-1">
-                  <Globe2 className="w-3 h-3 text-blue-400" />
-                  Satellite Engine (Keyless)
+                <span className="text-[10px] font-bold text-blue-400 flex items-center gap-1">
+                  <Globe2 className="w-3 h-3" />
+                  Satellite Engine
                 </span>
               )}
             </div>
           </div>
         </div>
 
-        {/* Center: Search & GPS Locator (Hero Finding Tool) */}
-        <div className="flex-1 max-w-xl flex flex-col items-center relative">
-          <div className="w-full flex items-center gap-2">
-            <form onSubmit={handleSearch} className="flex-1 relative">
-              <div className="flex items-center bg-slate-950/90 border border-slate-700 rounded-xl overflow-hidden shadow-inner focus-within:border-emerald-500 transition-colors">
-                <div className="pl-3 text-slate-400 shrink-0">
-                  <Search className="w-4 h-4" />
-                </div>
-                <input
-                  ref={searchInputRef}
-                  type="text"
-                  placeholder="Search village, town, mandal, district or address..."
-                  value={searchQuery}
-                  onChange={(e) => handleSearchInputChange(e.target.value)}
-                  onFocus={() => {
-                    if (searchSuggestions.length > 0) setShowSuggestionsDropdown(true);
-                  }}
-                  className="bg-transparent border-none text-xs text-white px-2.5 py-2 w-full focus:outline-none placeholder:text-slate-500 font-medium"
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSearchQuery("");
-                      setSearchSuggestions([]);
-                      setShowSuggestionsDropdown(false);
-                    }}
-                    className="p-1 text-slate-500 hover:text-slate-300 mr-1 cursor-pointer"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-                <button
-                  type="submit"
-                  disabled={isSearching || !searchQuery.trim()}
-                  className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-slate-950 px-3.5 py-1.5 mr-1 rounded-lg text-xs font-bold transition-all cursor-pointer shrink-0"
-                >
-                  {isSearching ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : "Find"}
-                </button>
+        {/* Center: Search & GPS Locator */}
+        <div className="flex-1 max-w-md sm:max-w-lg flex items-center gap-2 relative">
+          <form onSubmit={handleSearch} className="flex-1 relative">
+            <div className="flex items-center bg-slate-950/90 border border-slate-700 rounded-xl overflow-hidden focus-within:border-emerald-500 transition-colors shadow-inner">
+              <div className="pl-2.5 text-slate-400 shrink-0">
+                <Search className="w-3.5 h-3.5" />
               </div>
-
-              {/* Live Interactive Search Suggestions Dropdown */}
-              <AnimatePresence>
-                {showSuggestionsDropdown && searchSuggestions.length > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 4 }}
-                    className="absolute top-full left-0 right-0 mt-1.5 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl z-50 overflow-hidden divide-y divide-slate-800 text-left"
-                  >
-                    {searchSuggestions.map((item, idx) => (
-                      <button
-                        key={idx}
-                        type="button"
-                        onClick={() => {
-                          setSearchQuery(item.displayName.split(",")[0]);
-                          navigateMapToCoordinates(item.lat, item.lng, item.displayName.split(",")[0], 18);
-                        }}
-                        className="w-full px-3.5 py-2.5 text-left hover:bg-slate-800 flex items-start gap-2.5 transition-colors cursor-pointer"
-                      >
-                        <MapPin className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-bold text-white truncate">
-                            {item.displayName.split(",")[0]}
-                          </p>
-                          <p className="text-[10px] text-slate-400 truncate">
-                            {item.displayName.split(",").slice(1).join(",")}
-                          </p>
-                        </div>
-                      </button>
-                    ))}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </form>
-
-            {/* Use My Current Location Button */}
-            <button
-              type="button"
-              onClick={handleUseCurrentLocation}
-              disabled={isLocating}
-              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer shrink-0 active:scale-95 disabled:opacity-60 border-0 ${
-                gpsAccuracyM !== null
-                  ? "bg-slate-800 hover:bg-slate-700 text-blue-300 border border-blue-500/30"
-                  : "bg-blue-600 hover:bg-blue-500 text-white"
-              }`}
-              title={gpsAccuracyM !== null ? "Refresh your current location" : "Locate using device/browser current location"}
-            >
-              {isLocating ? (
-                <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-300" />
-              ) : gpsAccuracyM !== null ? (
-                <RefreshCw className="w-3.5 h-3.5 text-blue-400" />
-              ) : (
-                <Navigation className="w-3.5 h-3.5 text-white" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder="Search village, town, or mandal..."
+                value={searchQuery}
+                onChange={(e) => handleSearchInputChange(e.target.value)}
+                onFocus={() => {
+                  if (searchSuggestions.length > 0) setShowSuggestionsDropdown(true);
+                }}
+                className="bg-transparent border-none text-xs text-white px-2 py-1.5 w-full focus:outline-none placeholder:text-slate-500 font-medium"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchQuery("");
+                    setSearchSuggestions([]);
+                    setShowSuggestionsDropdown(false);
+                  }}
+                  className="p-1 text-slate-500 hover:text-slate-300 mr-1 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
               )}
-              <span className="hidden md:inline">
-                {isLocating
-                  ? "Getting your current location…"
-                  : gpsAccuracyM !== null
-                  ? "Refresh Location"
-                  : "Use My Current Location"}
-              </span>
-            </button>
-          </div>
-
-          {/* Quick Region Presets */}
-          <div className="hidden md:flex items-center gap-1.5 mt-1.5 overflow-x-auto w-full">
-            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider shrink-0 flex items-center gap-1">
-              <Sparkles className="w-3 h-3 text-emerald-400" />
-              Quick Jump:
-            </span>
-            {QUICK_LOCATIONS.map((loc) => (
               <button
-                key={loc.name}
-                type="button"
-                onClick={() => navigateMapToCoordinates(loc.lat, loc.lng, loc.name, 17)}
-                className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 text-[10px] font-semibold transition-all cursor-pointer shrink-0"
+                type="submit"
+                disabled={isSearching || !searchQuery.trim()}
+                className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-slate-950 px-2.5 py-1 mr-1 rounded-lg text-xs font-bold transition-all cursor-pointer shrink-0"
               >
-                {loc.name}
+                {isSearching ? <RefreshCw className="w-3 h-3 animate-spin" /> : "Find"}
               </button>
-            ))}
-          </div>
+            </div>
+
+            {/* Live Search Suggestions Dropdown */}
+            <AnimatePresence>
+              {showSuggestionsDropdown && searchSuggestions.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 4 }}
+                  className="absolute top-full left-0 right-0 mt-1.5 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-[1500] overflow-hidden divide-y divide-slate-800 text-left"
+                >
+                  {searchSuggestions.map((item, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery(item.displayName.split(",")[0]);
+                        navigateMapToCoordinates(item.lat, item.lng, item.displayName.split(",")[0], 18);
+                      }}
+                      className="w-full px-3 py-2 text-left hover:bg-slate-800 flex items-start gap-2 transition-colors cursor-pointer"
+                    >
+                      <MapPin className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-bold text-white truncate">
+                          {item.displayName.split(",")[0]}
+                        </p>
+                        <p className="text-[10px] text-slate-400 truncate">
+                          {item.displayName.split(",").slice(1).join(",")}
+                        </p>
+                      </div>
+                    </button>
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </form>
+
+          {/* Use My Current Location Button */}
+          <button
+            type="button"
+            onClick={handleUseCurrentLocation}
+            disabled={isLocating}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer shrink-0 border-0 ${
+              gpsAccuracyM !== null
+                ? "bg-slate-800 hover:bg-slate-700 text-blue-300 border border-blue-500/30"
+                : "bg-blue-600 hover:bg-blue-500 text-white"
+            }`}
+            title="Locate via device GPS"
+          >
+            {isLocating ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
+            ) : (
+              <Navigation className="w-3.5 h-3.5" />
+            )}
+            <span className="hidden lg:inline">{isLocating ? "Locating…" : "My Location"}</span>
+          </button>
         </div>
 
-        {/* Right: Quick Tools (Basemap, Key config, Help) */}
-        <div className="flex items-center gap-1.5">
-          {/* Top Draw CTA if in Find Step */}
-          {!isDrawingActive && vertices.length < 3 && (
-            <button
-              type="button"
-              onClick={handleStartDrawing}
-              className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs transition-all shadow-md cursor-pointer border-0"
-            >
-              <Edit3 className="w-3.5 h-3.5" />
-              <span>Draw Boundary</span>
-            </button>
-          )}
-
-          <div className="hidden sm:inline-flex bg-slate-800 p-0.5 rounded-lg border border-slate-700">
+        {/* Right: Basemap Toggles, Zoom, API Config & Help */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Basemap Switcher (Satellite vs Road) */}
+          <div className="inline-flex bg-slate-800 p-0.5 rounded-lg border border-slate-700">
             {(["hybrid", "roadmap"] as const).map((t) => (
               <button
                 key={t}
                 type="button"
                 onClick={() => handleBasemapChange(t)}
-                className={`px-2 py-1 rounded text-[10px] font-bold uppercase transition-all cursor-pointer ${
+                title={t === "hybrid" ? "Satellite imagery view" : "Road & OpenStreetMap street view"}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition-all cursor-pointer ${
                   mapType === t ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-white"
                 }`}
               >
-                {t === "hybrid" ? "Satellite" : "Roads"}
+                {t === "hybrid" ? "Satellite" : "Road / OSM"}
               </button>
             ))}
           </div>
 
-          <button
-            type="button"
-            onClick={() => setShowKeyModal(true)}
-            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-amber-400 transition-all cursor-pointer border border-slate-700"
-            title="Google Maps API Key Configuration"
-          >
-            <Key className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowHelpGuide(true)}
-            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-all cursor-pointer border border-slate-700"
-            title="Step-by-step Survey Guide"
-          >
-            <HelpCircle className="w-4 h-4" />
-          </button>
-        </div>
-      </header>
-
-      {/* ================= 2. Map Canvas (Full Viewport Hero) ================= */}
-      <main
-        className={`relative flex-1 w-full h-full bg-slate-950 overflow-hidden ${
-          isDrawingActive ? "cursor-crosshair" : "cursor-grab"
-        }`}
-        onClick={() => setShowSuggestionsDropdown(false)}
-      >
-        <div ref={mapContainerRef} className="w-full h-full" />
-
-        {/* Loading Indicator for Maps */}
-        {isLoadingMaps && (
-          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-40">
-            <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin" />
-            <p className="text-sm font-bold text-slate-200">Loading High-Resolution Satellite Map...</p>
-          </div>
-        )}
-
-        {/* Top Floating Status Pills */}
-        <div className="absolute top-4 left-4 z-20 flex flex-col gap-2 max-w-md">
-          {/* GPS Loading State */}
-          {isLocating && (
-            <motion.div
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-slate-900/95 backdrop-blur-md border border-blue-500/50 p-2.5 rounded-2xl shadow-xl flex items-center gap-2.5 text-xs text-blue-300"
-            >
-              <RefreshCw className="w-4 h-4 text-blue-400 animate-spin shrink-0" />
-              <span className="font-semibold">Getting your current location…</span>
-            </motion.div>
-          )}
-
-          {/* Location Found Confirmation (Search) with immediate Draw Action */}
-          {locationFoundNotice && !isLocating && (
-            <motion.div
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-slate-900/95 backdrop-blur-md border border-emerald-500/50 p-3 rounded-2xl shadow-2xl flex items-center justify-between gap-3 text-xs"
-            >
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
-                  <CheckCircle2 className="w-4 h-4" />
-                </div>
-                <div>
-                  <span className="font-extrabold text-emerald-300 text-xs">{locationFoundNotice}</span>
-                  <p className="text-[10px] text-slate-300">Move map to your farm parcel and start drawing</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                {!isDrawingActive && (
-                  <button
-                    type="button"
-                    onClick={handleStartDrawing}
-                    className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs rounded-xl cursor-pointer border-0 shadow-md flex items-center gap-1"
-                  >
-                    <Edit3 className="w-3.5 h-3.5" />
-                    <span>Draw Boundary</span>
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setLocationFoundNotice(null)}
-                  className="text-slate-400 hover:text-white p-1"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </motion.div>
-          )}
-
-          {/* GPS Low Accuracy Warning */}
-          {gpsWarning && gpsAccuracyM !== null && !isLocating && (
-            <motion.div
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-amber-950/95 backdrop-blur-md border border-amber-500/60 p-3 rounded-2xl shadow-2xl space-y-2 text-left max-w-sm"
-            >
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-xs font-bold text-amber-200">
-                    Location accuracy: ±{Math.round(gpsAccuracyM)} m (Low Accuracy)
-                  </p>
-                  <p className="text-[10px] text-amber-300/80 leading-snug mt-0.5">
-                    {gpsWarning}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 pt-0.5">
-                <button
-                  type="button"
-                  onClick={handleUseCurrentLocation}
-                  className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-[11px] rounded-lg cursor-pointer flex items-center gap-1 border-0"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  <span>Try Again</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (searchInputRef.current) searchInputRef.current.focus();
-                  }}
-                  className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-[11px] rounded-lg cursor-pointer flex items-center gap-1 border border-slate-700"
-                >
-                  <Search className="w-3 h-3" />
-                  <span>Search Village</span>
-                </button>
-              </div>
-            </motion.div>
-          )}
-
-          {/* GPS High Accuracy Status Pill */}
-          {!gpsWarning && gpsAccuracyM !== null && !isLocating && (
-            <motion.div
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-slate-900/95 backdrop-blur-md border border-blue-500/40 p-2.5 rounded-2xl shadow-xl flex items-center justify-between gap-3 text-left"
-            >
-              <div className="flex items-start gap-2">
-                <Crosshair className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-[11px] font-bold text-blue-300">
-                    Location accuracy: ±{Math.round(gpsAccuracyM)} m
-                  </p>
-                  <p className="text-[9px] text-slate-400 leading-snug mt-0.5">
-                    {formattedLocationTime ? `Acquired at ${formattedLocationTime} • ` : ""}Map centered on your current position.
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={handleUseCurrentLocation}
-                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white cursor-pointer border border-slate-700 flex items-center gap-1 text-[10px] font-medium"
-                  title="Refresh Location"
-                >
-                  <RefreshCw className="w-3 h-3 text-blue-400" />
-                  <span className="hidden sm:inline">Refresh</span>
-                </button>
-                {!isDrawingActive && (
-                  <button
-                    type="button"
-                    onClick={handleStartDrawing}
-                    className="px-2.5 py-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-[11px] rounded-lg cursor-pointer border-0"
-                  >
-                    Draw Boundary
-                  </button>
-                )}
-              </div>
-            </motion.div>
-          )}
-
-          {/* GPS Error Alert */}
-          {gpsError && !isLocating && (
-            <motion.div
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-rose-950/95 border border-rose-800/80 p-3 rounded-2xl text-xs text-rose-200 flex items-center justify-between gap-2 shadow-xl text-left max-w-sm"
-            >
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-semibold text-[11px] leading-snug block">{gpsError}</span>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={handleUseCurrentLocation}
-                  className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white font-bold text-[10px] rounded-lg cursor-pointer border-0"
-                >
-                  Try Again
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setGpsError(null)}
-                  className="text-rose-400 hover:text-white p-0.5"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </motion.div>
-          )}
-
-          {/* Geometry Validation Warning */}
-          {validationError && (
-            <div className="bg-rose-950/90 border border-rose-800/80 px-3 py-2 rounded-xl text-xs text-rose-200 flex items-center gap-2 shadow-lg">
-              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-              <span className="font-semibold text-[11px]">{validationError}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Floating Right Controls: Zoom & Basemap */}
-        <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-2">
-          <div className="bg-slate-900/90 backdrop-blur-md border border-slate-700 rounded-xl overflow-hidden shadow-xl flex flex-col">
+          {/* Zoom In & Out Quick Buttons */}
+          <div className="hidden sm:inline-flex bg-slate-800 p-0.5 rounded-lg border border-slate-700 items-center">
             <button
               type="button"
               onClick={() => {
                 if (activeEngine === "google") googleMapRef.current?.setZoom(googleMapRef.current.getZoom() + 1);
                 else leafletMapRef.current?.zoomIn();
               }}
-              className="p-2.5 text-slate-300 hover:text-white hover:bg-slate-800 transition-all cursor-pointer border-b border-slate-800"
-              title="Zoom in"
+              className="p-1 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              title="Zoom In"
             >
-              <ZoomIn className="w-4 h-4" />
+              <ZoomIn className="w-3.5 h-3.5" />
             </button>
             <button
               type="button"
@@ -1640,310 +1645,514 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
                 if (activeEngine === "google") googleMapRef.current?.setZoom(googleMapRef.current.getZoom() - 1);
                 else leafletMapRef.current?.zoomOut();
               }}
-              className="p-2.5 text-slate-300 hover:text-white hover:bg-slate-800 transition-all cursor-pointer"
-              title="Zoom out"
+              className="p-1 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              title="Zoom Out"
             >
-              <ZoomOut className="w-4 h-4" />
+              <ZoomOut className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={handleFitBounds}
+              className="p-1 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              title="Fit Bounds"
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
             </button>
           </div>
+
+          {/* API Configuration Button (Flicker-Free Modal Trigger) */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowKeyModal(true);
+            }}
+            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-amber-400 transition-all cursor-pointer border border-slate-700 flex items-center gap-1 text-xs font-semibold"
+            title="Google Maps API Key Setup"
+          >
+            <Key className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden xl:inline text-[11px]">API Key</span>
+          </button>
+
+          {/* Help Guide Button */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowHelpGuide(true);
+            }}
+            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-all cursor-pointer border border-slate-700"
+            title="Survey Guide"
+          >
+            <HelpCircle className="w-3.5 h-3.5" />
+          </button>
         </div>
+      </header>
 
-        {/* ================= 3. STEP 1 INITIAL OVERLAY CARD (For New Plots) ================= */}
-        {currentStep === "find" && vertices.length === 0 && !locationFoundNotice && !gpsAccuracyM && (
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: 10 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 bg-slate-900/95 backdrop-blur-md border border-slate-700 p-6 rounded-3xl shadow-2xl max-w-sm w-11/12 text-center space-y-4"
-          >
-            <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center mx-auto">
-              <MapPin className="w-6 h-6" />
-            </div>
-
-            <div className="space-y-1">
-              <h3 className="font-black text-base text-white">Find Your Farm</h3>
-              <p className="text-xs text-slate-300 leading-relaxed">
-                Search your village name above or click <strong>Use My Current Location</strong>, then tap <strong>Draw Farm Boundary</strong>.
-              </p>
-            </div>
-
-            <div className="pt-2 space-y-2">
-              <button
-                type="button"
-                onClick={handleUseCurrentLocation}
-                disabled={isLocating}
-                className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer border-0 disabled:opacity-60"
-              >
-                {isLocating ? (
-                  <RefreshCw className="w-4 h-4 animate-spin text-white" />
-                ) : (
-                  <Navigation className="w-4 h-4 text-white" />
-                )}
-                <span>{isLocating ? "Getting your current location…" : "📍 Use My Current Location"}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleStartDrawing}
-                className="w-full py-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs rounded-xl transition-all shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2 cursor-pointer border-0"
-              >
-                <Edit3 className="w-4 h-4" />
-                <span>✏️ Draw Farm Boundary</span>
-              </button>
-              <p className="text-[10px] text-slate-400 mt-1">
-                Or search above or pan map freely
-              </p>
-            </div>
-          </motion.div>
-        )}
-
-        {/* ================= 4. COMPACT FLOATING MEASUREMENT CARD ================= */}
-        {vertices.length >= 2 && (
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="absolute bottom-24 sm:bottom-20 left-4 z-20 bg-slate-900/95 backdrop-blur-md border border-slate-700 p-3 rounded-2xl shadow-2xl max-w-[240px] w-full text-left font-sans"
-          >
-            <div className="flex items-center justify-between border-b border-slate-800 pb-1.5 mb-2">
-              <div className="flex items-center gap-1.5">
-                <Ruler className="w-3.5 h-3.5 text-emerald-400" />
-                <span className="font-extrabold text-[11px] text-white uppercase tracking-wider">
-                  Farm Boundary
-                </span>
-              </div>
-              <div className="inline-flex bg-slate-800 p-0.5 rounded-md border border-slate-700">
-                {(["acres", "hectares"] as const).map((u) => (
-                  <button
-                    key={u}
-                    type="button"
-                    onClick={() => setAreaUnit(u)}
-                    className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase transition-all cursor-pointer ${
-                      areaUnit === u ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-white"
+      {/* ================= 2. WORKSPACE BODY: DEDICATED SIDE TOOLKIT + MAP CANVAS ================= */}
+      <div className="relative flex-1 w-full min-h-0 flex flex-row overflow-hidden">
+        {/* ================= DEDICATED SIDE TOOLKIT (aside: GUARANTEED z-[2000] - NEVER underneath map) ================= */}
+        {isSidebarOpen && (
+          <aside className="relative z-[2000] w-[360px] sm:w-[380px] lg:w-[410px] shrink-0 bg-slate-900 border-r border-slate-800 flex flex-col shadow-2xl h-full overflow-hidden select-text">
+            {/* Scrollable Form Body */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {/* Header inside Sidebar */}
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold">
+                    <Edit3 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-sm text-white tracking-tight">
+                      {mode === "create" ? "Plot Configuration" : "Boundary Surveyor"}
+                    </h3>
+                    <p className="text-[11px] text-slate-400">Trace perimeter & set agronomics</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                      isDrawingActive
+                        ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                        : "bg-slate-800 text-slate-400"
                     }`}
                   >
-                    {u === "acres" ? "ac" : "ha"}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-1 text-xs">
-              <div className="flex justify-between items-baseline">
-                <span className="text-[11px] text-slate-400">Area:</span>
-                <span className="font-mono font-black text-emerald-400 text-xs">
-                  {areaAcres !== null
-                    ? areaUnit === "hectares"
-                      ? `${acresToHectares(areaAcres).toFixed(2)} ha`
-                      : `${areaAcres.toFixed(2)} acres`
-                    : "Connecting..."}
-                </span>
+                    {isDrawingActive ? "Draw Active" : "Paused"}
+                  </span>
+                </div>
               </div>
 
-              <div className="flex justify-between items-baseline">
-                <span className="text-[11px] text-slate-400">Perimeter:</span>
-                <span className="font-mono font-bold text-white text-xs">
-                  {segmentStats.perimeterM > 1000
-                    ? `${(segmentStats.perimeterM / 1000).toFixed(2)} km`
-                    : `${Math.round(segmentStats.perimeterM)} m`}
-                </span>
-              </div>
-
-              <div className="flex justify-between items-baseline pt-1 border-t border-slate-800/80">
-                <span className="text-[10px] text-slate-400">Points:</span>
-                <span className="font-mono font-semibold text-slate-300 text-[11px]">
-                  {vertices.length} vertices
-                </span>
-              </div>
-            </div>
-          </motion.div>
-        )}
-
-        {/* ================= 5. FLOATING BOTTOM GUIDED HUD & ACTION BAR ================= */}
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 w-11/12 max-w-2xl flex flex-col items-center gap-2">
-          {/* Active Drawing Banner */}
-          {isDrawingActive ? (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-emerald-950/90 border border-emerald-500/50 backdrop-blur-md px-4 py-2 rounded-2xl shadow-xl flex items-center gap-2 text-xs text-emerald-200"
-            >
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
-              <span className="font-bold text-[11px] sm:text-xs">
-                Drawing Active — Click corners/edges of your farm on the satellite map. ({vertices.length} points placed)
-              </span>
-            </motion.div>
-          ) : null}
-
-          {/* Main Action Bar with 4-Step Progress */}
-          <div className="bg-slate-900/95 backdrop-blur-md border border-slate-700 p-2 sm:p-2.5 rounded-2xl shadow-2xl w-full flex flex-wrap items-center justify-between gap-2.5">
-            {/* 4-Step Progress Indicator (Clickable to switch modes) */}
-            <div className="flex items-center gap-1 sm:gap-2 text-[10px] sm:text-xs font-bold overflow-x-auto py-0.5">
-              {/* Step 1: Find Farm */}
-              <button
-                type="button"
-                onClick={() => {
-                  setCurrentStep("find");
-                  setIsDrawingActive(false);
-                }}
-                className={`flex items-center gap-1 px-2 py-1 rounded-lg transition-colors cursor-pointer border-0 ${
-                  currentStep === "find"
-                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                    : vertices.length > 0
-                    ? "text-slate-400 hover:text-white"
-                    : "text-slate-300"
-                }`}
-              >
-                <span>①</span>
-                <span className="hidden sm:inline">Find Farm</span>
-              </button>
-
-              <ChevronRight className="w-3 h-3 text-slate-600 shrink-0" />
-
-              {/* Step 2: Draw Boundary */}
-              <button
-                type="button"
-                onClick={() => {
-                  setCurrentStep("draw");
-                  setIsDrawingActive(true);
-                }}
-                className={`flex items-center gap-1 px-2 py-1 rounded-lg transition-colors cursor-pointer border-0 ${
-                  currentStep === "draw" || isDrawingActive
-                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                    : vertices.length >= 3
-                    ? "text-slate-400 hover:text-white"
-                    : "text-slate-500 hover:text-slate-300"
-                }`}
-              >
-                <span>②</span>
-                <span className="hidden sm:inline">Draw Boundary</span>
-              </button>
-
-              <ChevronRight className="w-3 h-3 text-slate-600 shrink-0" />
-
-              {/* Step 3: Adjust */}
-              <button
-                type="button"
-                onClick={() => {
-                  if (vertices.length >= 3) {
-                    setCurrentStep("adjust");
-                    setIsDrawingActive(false);
-                  }
-                }}
-                className={`flex items-center gap-1 px-2 py-1 rounded-lg transition-colors cursor-pointer border-0 ${
-                  currentStep === "adjust" && !isDrawingActive
-                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                    : vertices.length >= 3
-                    ? "text-slate-400 hover:text-white"
-                    : "text-slate-500 opacity-60 cursor-not-allowed"
-                }`}
-              >
-                <span>③</span>
-                <span className="hidden sm:inline">Adjust</span>
-              </button>
-
-              <ChevronRight className="w-3 h-3 text-slate-600 shrink-0" />
-
-              {/* Step 4: Confirm */}
-              <button
-                type="button"
-                onClick={() => {
-                  if (vertices.length >= 3 && !validationError) {
-                    setShowConfirmModal(true);
-                  }
-                }}
-                className={`flex items-center gap-1 px-2 py-1 rounded-lg transition-colors cursor-pointer border-0 ${
-                  currentStep === "confirm"
-                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                    : vertices.length >= 3
-                    ? "text-slate-400 hover:text-white"
-                    : "text-slate-500 opacity-60 cursor-not-allowed"
-                }`}
-              >
-                <span>④</span>
-                <span className="hidden sm:inline">Confirm</span>
-              </button>
-            </div>
-
-            {/* Action Buttons Group */}
-            <div className="flex items-center gap-2 ml-auto">
-              {/* Draw Boundary Trigger (When not in drawing mode and few vertices) */}
-              {!isDrawingActive && vertices.length < 3 && (
-                <button
-                  type="button"
-                  onClick={handleStartDrawing}
-                  className="px-3.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs rounded-xl transition-all shadow-md flex items-center gap-1.5 cursor-pointer border-0"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                  <span>Draw Farm Boundary</span>
-                </button>
-              )}
-
-              {/* Editing Controls: Undo, Clear, Toggle Edit (When points exist) */}
-              {vertices.length > 0 && (
-                <>
-                  <button
-                    type="button"
-                    onClick={handleUndo}
-                    className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-all cursor-pointer border border-slate-700 flex items-center gap-1 text-xs font-semibold"
-                    title="Undo last point"
-                  >
-                    <Undo2 className="w-3.5 h-3.5 text-amber-400" />
-                    <span className="hidden md:inline">Undo</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setShowClearConfirm(true)}
-                    className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-rose-300 hover:text-rose-200 transition-all cursor-pointer border border-slate-700 flex items-center gap-1 text-xs font-semibold"
-                    title="Clear boundary"
-                  >
-                    <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-                    <span className="hidden md:inline">Clear</span>
-                  </button>
-
-                  {/* Toggle Edit/Add points */}
+              {/* 1. GIS Drawing Tools (Pencil, Undo, Clear) */}
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                  GIS Boundary Drawing Tools:
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {/* Pencil / Draw Tool Toggle */}
                   <button
                     type="button"
                     onClick={() => setIsDrawingActive(!isDrawingActive)}
-                    className={`px-2.5 py-1.5 rounded-xl border transition-all cursor-pointer flex items-center gap-1 text-xs font-semibold ${
+                    className={`py-2.5 px-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 border shadow-sm ${
                       isDrawingActive
-                        ? "bg-emerald-500 text-slate-950 border-emerald-400 font-bold"
-                        : "bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700"
+                        ? "bg-emerald-500 text-slate-950 border-emerald-400 shadow-emerald-500/20"
+                        : "bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700"
                     }`}
-                    title={isDrawingActive ? "Done adding points" : "Add more points"}
+                    title="Toggle Polygon Drawing Mode"
                   >
                     <Edit3 className="w-3.5 h-3.5" />
-                    <span className="hidden md:inline">{isDrawingActive ? "Done Adding" : "Edit / Add"}</span>
+                    <span>{isDrawingActive ? "Active" : "Draw"}</span>
                   </button>
-                </>
-              )}
 
-              {/* Confirm & Save Button */}
+                  {/* Retake / Undo Button */}
+                  <button
+                    type="button"
+                    onClick={handleUndo}
+                    disabled={vertices.length === 0}
+                    className="py-2.5 px-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 border border-slate-700 text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                    title="Undo last placed corner point"
+                  >
+                    <Undo2 className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Undo</span>
+                  </button>
+
+                  {/* Clear All Button */}
+                  <button
+                    type="button"
+                    onClick={() => setShowClearConfirm(true)}
+                    disabled={vertices.length === 0}
+                    className="py-2.5 px-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-rose-300 hover:text-rose-200 border border-slate-700 text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                    title="Reset boundary"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Clear</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 2. Live Boundary Measurements Card */}
+              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3 space-y-2">
+                <div className="flex items-center justify-between border-b border-slate-800/80 pb-1.5">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    Calculated Metrics
+                  </span>
+                  <div className="inline-flex bg-slate-800 p-0.5 rounded-md border border-slate-700">
+                    {(["acres", "hectares"] as const).map((u) => (
+                      <button
+                        key={u}
+                        type="button"
+                        onClick={() => setAreaUnit(u)}
+                        className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase transition-all cursor-pointer ${
+                          areaUnit === u ? "bg-emerald-500 text-slate-950" : "text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        {u === "acres" ? "ac" : "ha"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 text-center pt-1">
+                  <div>
+                    <span className="text-[10px] text-slate-400 block font-medium">Area</span>
+                    <span className="font-mono font-black text-emerald-400 text-sm">
+                      {areaAcres !== null
+                        ? areaUnit === "hectares"
+                          ? `${acresToHectares(areaAcres).toFixed(2)} ha`
+                          : `${areaAcres.toFixed(2)} ac`
+                        : "0.00 ac"}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 block font-medium">Perimeter</span>
+                    <span className="font-mono font-bold text-white text-xs">
+                      {segmentStats.perimeterM > 1000
+                        ? `${(segmentStats.perimeterM / 1000).toFixed(2)} km`
+                        : `${Math.round(segmentStats.perimeterM)} m`}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 block font-medium">Boundary</span>
+                    <span className="font-mono font-bold text-slate-300 text-xs">
+                      {vertices.length} vertices
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* 3. Plot Metadata & Agronomic Selectors */}
+              <div className="space-y-3 pt-1 border-t border-slate-800">
+                {/* Plot Name Input */}
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">
+                    Plot Name *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g., East Palm Sector A"
+                    value={plotFormData.name}
+                    onChange={(e) => setPlotFormData((prev) => ({ ...prev, name: e.target.value }))}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white font-medium focus:border-emerald-500 focus:outline-none transition-colors"
+                  />
+                </div>
+
+                {/* Dropdowns Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {/* Irrigation Method Dropdown */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1">
+                      <Droplets className="w-3 h-3 text-blue-400" />
+                      Irrigation Method
+                    </label>
+                    <select
+                      value={plotFormData.irrigation}
+                      onChange={(e) => setPlotFormData((prev) => ({ ...prev, irrigation: e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-medium focus:border-emerald-500 focus:outline-none cursor-pointer"
+                    >
+                      <option value="Precision Drip">Precision Drip (Recommended)</option>
+                      <option value="Manual Drip">Manual Drip</option>
+                      <option value="Sprinkler System">Sprinkler System</option>
+                      <option value="Flood Irrigation">Flood Irrigation</option>
+                      <option value="Furrow Irrigation">Furrow Irrigation</option>
+                    </select>
+                  </div>
+
+                  {/* Soil Classification Dropdown */}
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1">
+                      <Layers className="w-3 h-3 text-amber-400" />
+                      Soil Classification
+                    </label>
+                    <select
+                      value={plotFormData.soilType}
+                      onChange={(e) => setPlotFormData((prev) => ({ ...prev, soilType: e.target.value }))}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-medium focus:border-emerald-500 focus:outline-none cursor-pointer"
+                    >
+                      <option value="Loamy">Loamy (Optimal)</option>
+                      <option value="Red Laterite">Red Laterite</option>
+                      <option value="Clay">Clay Soil</option>
+                      <option value="Sandy">Sandy Loam</option>
+                      <option value="Alluvial">Alluvial Soil</option>
+                      <option value="Black Cotton">Black Cotton Soil</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Expandable Optional Details */}
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowMoreFields(!showMoreFields)}
+                    className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 flex items-center gap-1 py-1 cursor-pointer"
+                  >
+                    <ChevronDown className={`w-3 h-3 transition-transform ${showMoreFields ? "rotate-180" : ""}`} />
+                    <span>{showMoreFields ? "Hide Advanced Crop Specs" : "+ Advanced Crop & Planting Details"}</span>
+                  </button>
+
+                  {showMoreFields && (
+                    <div className="grid grid-cols-2 gap-2.5 pt-2">
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                          <Sprout className="w-3 h-3 text-emerald-400" />
+                          Crop Type
+                        </label>
+                        <input
+                          type="text"
+                          value={plotFormData.crop}
+                          onChange={(e) => setPlotFormData((prev) => ({ ...prev, crop: e.target.value }))}
+                          className="w-full bg-slate-950 border border-slate-700 rounded-xl px-2.5 py-2 text-xs text-white focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                          <Calendar className="w-3 h-3 text-blue-400" />
+                          Planting Date
+                        </label>
+                        <input
+                          type="date"
+                          value={plotFormData.plantingDate}
+                          onChange={(e) => setPlotFormData((prev) => ({ ...prev, plantingDate: e.target.value }))}
+                          className="w-full bg-slate-950 border border-slate-700 rounded-xl px-2.5 py-2 text-xs text-white focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Validation Error Banner */}
+                {validationError && (
+                  <div className="bg-rose-950/80 border border-rose-800 px-3 py-2 rounded-xl text-[11px] text-rose-200 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                    <span>{validationError}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Quick Preset Location Shortcuts */}
+              {vertices.length === 0 && (
+                <div className="pt-2 border-t border-slate-800/80">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                    Quick Jump to Oil Palm Belts:
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {QUICK_LOCATIONS.map((loc) => (
+                      <button
+                        key={loc.name}
+                        type="button"
+                        onClick={() => navigateMapToCoordinates(loc.lat, loc.lng, loc.name, 17)}
+                        className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[10px] font-semibold border border-slate-700 cursor-pointer"
+                      >
+                        {loc.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Pinned Bottom Submit Action in Sidebar */}
+            <div className="p-4 border-t border-slate-800 bg-slate-900/95 shrink-0">
               <button
                 type="button"
-                onClick={() => {
-                  if (vertices.length >= 3 && !validationError) {
-                    setShowConfirmModal(true);
-                  }
-                }}
-                disabled={vertices.length < 3 || !!validationError}
-                className={`px-3.5 py-1.5 rounded-xl font-black text-xs flex items-center gap-1.5 transition-all shadow-md cursor-pointer border-0 ${
-                  vertices.length >= 3 && !validationError
-                    ? "bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-500/20"
+                onClick={handleSubmitPlot}
+                disabled={vertices.length < 3 || !plotFormData.name.trim() || !!validationError}
+                className={`w-full py-3 px-4 rounded-xl font-black text-xs transition-all shadow-xl flex items-center justify-center gap-2 cursor-pointer border-0 ${
+                  vertices.length >= 3 && plotFormData.name.trim() && !validationError
+                    ? "bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 shadow-emerald-500/25 active:scale-98"
                     : "bg-slate-800 text-slate-500 cursor-not-allowed"
                 }`}
               >
                 <Check className="w-4 h-4" />
-                <span>Confirm & Save</span>
+                <span>{mode === "create" ? "Create Farm Plot" : "Save Plot Boundary"}</span>
+              </button>
+              {vertices.length < 3 && (
+                <p className="text-[10px] text-slate-400 text-center mt-1.5 font-medium">
+                  Click farm corners on the satellite map to draw perimeter ({vertices.length}/3 points placed)
+                </p>
+              )}
+            </div>
+          </aside>
+        )}
+
+        {/* ================= MAP CANVAS (main: taking all remaining screen width) ================= */}
+        <main
+          className={`relative flex-1 h-full min-w-0 min-h-0 bg-slate-950 overflow-hidden z-[100] ${
+            isDrawingActive ? "cursor-crosshair" : "cursor-grab"
+          }`}
+          onClick={() => setShowSuggestionsDropdown(false)}
+        >
+          {/* Map DOM Element (absolute inset-0 ensures precise pixel bounding box) */}
+          <div ref={mapContainerRef} className="absolute inset-0 w-full h-full z-[100]" />
+
+          {/* Loading Indicator */}
+          {isLoadingMaps && (
+            <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center gap-2.5 z-[600]">
+              <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin" />
+              <p className="text-sm font-bold text-slate-200">Loading Satellite Imagery...</p>
+            </div>
+          )}
+
+          {/* ================= FLOATING MAP GIS QUICK TOOLS & STATUS (z-[1500]) ================= */}
+          <div className="absolute top-3.5 left-3.5 z-[1500] flex flex-wrap items-center gap-2 pointer-events-auto max-w-[calc(100%-120px)]">
+            {!isSidebarOpen && (
+              <button
+                type="button"
+                onClick={() => setIsSidebarOpen(true)}
+                className="py-2 px-3.5 rounded-xl bg-slate-900/95 hover:bg-slate-800 text-emerald-400 border border-emerald-500/40 text-xs font-black shadow-2xl flex items-center gap-2 cursor-pointer backdrop-blur-md transition-all active:scale-95"
+                title="Open Plot Configuration & Details Panel"
+              >
+                <PanelLeftOpen className="w-4 h-4" />
+                <span>Open Plot Toolkit</span>
+              </button>
+            )}
+
+            {/* Quick Draw Mode Switcher */}
+            <button
+              type="button"
+              onClick={() => setIsDrawingActive(!isDrawingActive)}
+              className={`py-2 px-3.5 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 shadow-2xl backdrop-blur-md border active:scale-95 ${
+                isDrawingActive
+                  ? "bg-emerald-500 text-slate-950 border-emerald-400 shadow-emerald-500/30"
+                  : "bg-slate-900/95 text-slate-200 border-slate-700 hover:bg-slate-800"
+              }`}
+              title="Click on the satellite map to trace boundary"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>{isDrawingActive ? "Drawing Active (Click Map)" : "Pencil Tool"}</span>
+            </button>
+
+            {/* Quick Undo */}
+            <button
+              type="button"
+              onClick={handleUndo}
+              disabled={vertices.length === 0}
+              className="py-2 px-3 rounded-xl bg-slate-900/95 hover:bg-slate-800 disabled:opacity-40 text-amber-400 border border-slate-700 text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-2xl backdrop-blur-md active:scale-95"
+              title="Undo last placed corner point"
+            >
+              <Undo2 className="w-3.5 h-3.5" />
+              <span>Undo</span>
+            </button>
+
+            {/* Quick Clear */}
+            {vertices.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowClearConfirm(true)}
+                className="py-2 px-3 rounded-xl bg-slate-900/95 hover:bg-rose-950/80 text-rose-400 border border-rose-500/40 text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-2xl backdrop-blur-md active:scale-95"
+                title="Reset boundary"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Reset</span>
+              </button>
+            )}
+
+            {/* Quick Live Calculated Metric Pill */}
+            {areaAcres !== null && (
+              <div className="bg-slate-900/95 backdrop-blur-md border border-emerald-500/50 px-3 py-1.5 rounded-xl shadow-2xl flex items-center gap-2 text-xs">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="font-mono font-black text-emerald-400">
+                  {areaUnit === "hectares" ? `${acresToHectares(areaAcres).toFixed(2)} ha` : `${areaAcres.toFixed(2)} ac`}
+                </span>
+                <span className="text-[10px] text-slate-400 font-mono">({vertices.length} vertices)</span>
+              </div>
+            )}
+
+            {/* GPS Accuracy Indicator */}
+            {gpsAccuracyM !== null && !isLocating && (
+              <div className="bg-slate-900/90 backdrop-blur-md border border-blue-500/40 px-3 py-1.5 rounded-xl shadow-lg flex items-center justify-between gap-2 text-[11px]">
+                <span className="font-bold text-blue-300">GPS: ±{Math.round(gpsAccuracyM)}m</span>
+              </div>
+            )}
+          </div>
+
+          {/* Floating Right Map Controls (z-[900]) */}
+          <div className="absolute top-3 right-3 z-[900] flex flex-col gap-2">
+            <div className="bg-slate-900/90 backdrop-blur-md border border-slate-700 rounded-xl overflow-hidden shadow-xl flex flex-col">
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeEngine === "google") googleMapRef.current?.setZoom(googleMapRef.current.getZoom() + 1);
+                  else leafletMapRef.current?.zoomIn();
+                }}
+                className="p-2.5 text-slate-300 hover:text-white hover:bg-slate-800 transition-all cursor-pointer border-b border-slate-800"
+                title="Zoom In"
+              >
+                <ZoomIn className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeEngine === "google") googleMapRef.current?.setZoom(googleMapRef.current.getZoom() - 1);
+                  else leafletMapRef.current?.zoomOut();
+                }}
+                className="p-2.5 text-slate-300 hover:text-white hover:bg-slate-800 transition-all cursor-pointer border-b border-slate-800"
+                title="Zoom Out"
+              >
+                <ZoomOut className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={handleFitBounds}
+                className="p-2.5 text-slate-300 hover:text-white hover:bg-slate-800 transition-all cursor-pointer"
+                title="Recenter / Fit Bounds"
+              >
+                <Maximize2 className="w-4 h-4" />
               </button>
             </div>
           </div>
-        </div>
-      </main>
 
-      {/* ================= 6. Clear Boundary Confirmation Dialog ================= */}
+          {/* Floating GPS Warning & Errors */}
+          {(gpsWarning || gpsError) && (
+            <div className="absolute bottom-4 right-4 z-[900] flex flex-col gap-2 max-w-sm">
+              {gpsWarning && (
+                <div className="bg-amber-950/90 border border-amber-800 px-3 py-2 rounded-xl text-xs text-amber-200 flex items-center gap-2 shadow-xl">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span className="font-semibold text-[11px]">{gpsWarning}</span>
+                </div>
+              )}
+              {gpsError && (
+                <div className="bg-rose-950/95 border border-rose-700 p-3 rounded-xl text-xs text-rose-200 flex flex-col gap-2 shadow-2xl backdrop-blur-md">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold text-xs text-rose-300">Device GPS Unavailable</p>
+                        <p className="text-[11px] text-rose-200 mt-0.5 leading-snug">{gpsError}</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setGpsError(null)}
+                      className="text-rose-400 hover:text-white p-0.5 shrink-0 cursor-pointer"
+                      title="Dismiss alert"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGpsError(null);
+                      searchInputRef.current?.focus();
+                    }}
+                    className="self-end px-2.5 py-1 bg-rose-800/80 hover:bg-rose-700 text-white text-[10px] font-bold rounded-lg transition-colors cursor-pointer"
+                  >
+                    Use Search Bar
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* ================= 4. CLEAR BOUNDARY CONFIRMATION DIALOG ================= */}
       <AnimatePresence>
         {showClearConfirm && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div
+            className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+            onClick={(e) => e.stopPropagation()}
+          >
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -1955,9 +2164,9 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
               </div>
 
               <div className="space-y-1">
-                <h3 className="font-black text-base text-white">Clear Farm Boundary?</h3>
+                <h3 className="font-black text-base text-white">Reset Drawn Boundary?</h3>
                 <p className="text-xs text-slate-300">
-                  This will remove all {vertices.length} points and allow you to start fresh.
+                  This will remove all {vertices.length} corner points and allow you to re-trace the plot.
                 </p>
               </div>
 
@@ -1974,7 +2183,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
                   onClick={handleClear}
                   className="flex-1 py-2.5 rounded-xl text-xs font-bold bg-rose-500 hover:bg-rose-400 text-white cursor-pointer border-0"
                 >
-                  Yes, Clear
+                  Yes, Reset
                 </button>
               </div>
             </motion.div>
@@ -1982,92 +2191,21 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         )}
       </AnimatePresence>
 
-      {/* ================= 7. Confirm & Save Summary Modal ================= */}
-      <AnimatePresence>
-        {showConfirmModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-slate-900 border border-slate-700 rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 text-left"
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center">
-                    <Check className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="font-black text-base text-white">Confirm Farm Boundary</h3>
-                    <p className="text-xs text-slate-400">Review surveyed measurements</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowConfirmModal(false)}
-                  className="p-1.5 text-slate-400 hover:text-white rounded-lg bg-slate-800"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              {/* Summary Stats Box */}
-              <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800 space-y-2.5">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-slate-400 font-medium">Farm Name:</span>
-                  <span className="font-bold text-white">{plotName}</span>
-                </div>
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-slate-400 font-medium">Total Area:</span>
-                  <span className="font-mono font-black text-emerald-400 text-sm">
-                    {areaAcres !== null ? `${areaAcres.toFixed(2)} acres (${acresToHectares(areaAcres).toFixed(2)} ha)` : "--"}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-slate-400 font-medium">Perimeter:</span>
-                  <span className="font-mono font-bold text-white">
-                    {segmentStats.perimeterM > 1000
-                      ? `${(segmentStats.perimeterM / 1000).toFixed(2)} km`
-                      : `${Math.round(segmentStats.perimeterM)} m`}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-slate-400 font-medium">Boundary Points:</span>
-                  <span className="font-mono font-semibold text-slate-300">
-                    {vertices.length} vertices
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowConfirmModal(false)}
-                  className="flex-1 py-2.5 rounded-xl text-xs font-bold text-slate-300 hover:text-white bg-slate-800 border border-slate-700 cursor-pointer"
-                >
-                  Back to Map
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirm}
-                  className="flex-1 py-2.5 rounded-xl text-xs font-black bg-emerald-500 hover:bg-emerald-400 text-slate-950 cursor-pointer border-0 shadow-lg shadow-emerald-500/20"
-                >
-                  ✓ Confirm & Save Boundary
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* ================= 8. API Key Configuration Modal ================= */}
+      {/* ================= 5. API KEY CONFIGURATION MODAL (Flicker-Free) ================= */}
       <AnimatePresence>
         {showKeyModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div
+            className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowKeyModal(false);
+            }}
+          >
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
               className="bg-slate-900 border border-slate-700 rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 text-left"
             >
               <div className="flex items-center justify-between">
@@ -2083,7 +2221,7 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
                 <button
                   type="button"
                   onClick={() => setShowKeyModal(false)}
-                  className="p-1 text-slate-400 hover:text-white rounded-lg"
+                  className="p-1 text-slate-400 hover:text-white rounded-lg cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2107,7 +2245,6 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
                 {mapsLoadError && (
                   <p className="text-amber-400 font-semibold">• Notice: {mapsLoadError}</p>
                 )}
-                <p>• If active billing is enabled on Google Cloud, <strong>Maps JavaScript API</strong> provides free monthly loads.</p>
                 <p>• If no key is provided, NutriPalm seamlessly uses the high-resolution keyless satellite engine so your boundary survey continues uninterrupted.</p>
               </div>
 
@@ -2140,25 +2277,32 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
         )}
       </AnimatePresence>
 
-      {/* ================= 9. Instructions Guide Modal ================= */}
+      {/* ================= 6. INSTRUCTIONS GUIDE MODAL ================= */}
       <AnimatePresence>
         {showHelpGuide && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div
+            className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowHelpGuide(false);
+            }}
+          >
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
               className="bg-slate-900 border border-slate-700 rounded-3xl p-6 max-w-lg w-full shadow-2xl space-y-4 text-left max-h-[85vh] overflow-y-auto"
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
                   <Info className="w-5 h-5 text-emerald-400" />
-                  <h3 className="font-black text-base text-white">Farmer Boundary Survey Guide</h3>
+                  <h3 className="font-black text-base text-white">Plot Creation & GIS Guide</h3>
                 </div>
                 <button
                   type="button"
                   onClick={() => setShowHelpGuide(false)}
-                  className="p-1.5 text-slate-400 hover:text-white rounded-lg bg-slate-800"
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg bg-slate-800 cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2166,23 +2310,18 @@ export const GoogleMapBoundarySurveyor: React.FC<GoogleMapBoundarySurveyorProps>
 
               <div className="space-y-3 text-xs text-slate-300 leading-relaxed">
                 <div className="p-3 bg-slate-950 rounded-2xl border border-slate-800 space-y-1">
-                  <p className="font-bold text-white">1. Find Farm</p>
-                  <p>Search your village/town, choose from live suggestions, or tap <strong>Use My Current Location</strong> to center the satellite map on your plot.</p>
+                  <p className="font-bold text-white">1. Locate Your Field</p>
+                  <p>Type your village, town, or mandal in the top search bar, or click <strong>My Location</strong> to automatically center on your field.</p>
                 </div>
 
                 <div className="p-3 bg-slate-950 rounded-2xl border border-slate-800 space-y-1">
-                  <p className="font-bold text-white">2. Draw Farm Boundary</p>
-                  <p>Tap <strong>Draw Farm Boundary</strong>, then click each corner around your field perimeter.</p>
+                  <p className="font-bold text-white">2. Trace the Boundary</p>
+                  <p>Click directly along your field perimeter on the satellite map. The system automatically computes acreage in real-time.</p>
                 </div>
 
                 <div className="p-3 bg-slate-950 rounded-2xl border border-slate-800 space-y-1">
-                  <p className="font-bold text-white">3. Adjust Boundary</p>
-                  <p>Drag any point to align with bunds or fences. Use <strong>Undo</strong> or <strong>Edit / Add</strong> as needed.</p>
-                </div>
-
-                <div className="p-3 bg-slate-950 rounded-2xl border border-slate-800 space-y-1">
-                  <p className="font-bold text-white">4. Confirm & Save</p>
-                  <p>Review total acreage and perimeter, then tap <strong>Confirm & Save Boundary</strong>.</p>
+                  <p className="font-bold text-white">3. Configure Agronomics & Submit</p>
+                  <p>Select your Irrigation Method and Soil Classification in the side toolkit, then click <strong>Create Farm Plot</strong>.</p>
                 </div>
               </div>
 
