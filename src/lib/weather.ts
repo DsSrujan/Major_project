@@ -34,6 +34,8 @@ export interface WeatherForecastDay {
   minTempC: number;
   maxTempC: number;
   precipitationProbabilityPercent: number | null;
+  precipitationSumMm: number | null;
+  et0FaoEvapotranspirationMm?: number | null;
   conditionCode: number;
   conditionText: string;
 }
@@ -162,14 +164,14 @@ export async function fetchWeather(
     }
   }
 
-  const forecastDays = Math.min(Math.max(opts.forecastDays ?? 5, 1), 14);
+  const forecastDays = Math.min(Math.max(opts.forecastDays ?? 7, 1), 14);
   const timeoutMs = opts.timeoutMs ?? 8000;
 
   const params = new URLSearchParams({
     latitude: lat.toFixed(5),
     longitude: lng.toFixed(5),
     current: "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,is_day",
-    daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+    daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,et0_fao_evapotranspiration",
     forecast_days: String(forecastDays),
     timezone: "auto",
   });
@@ -228,6 +230,8 @@ export async function fetchWeather(
         minTempC: daily.temperature_2m_min?.[i] ?? NaN,
         maxTempC: daily.temperature_2m_max?.[i] ?? NaN,
         precipitationProbabilityPercent: daily.precipitation_probability_max?.[i] ?? null,
+        precipitationSumMm: typeof daily.precipitation_sum?.[i] === "number" ? daily.precipitation_sum[i] : 0,
+        et0FaoEvapotranspirationMm: typeof daily.et0_fao_evapotranspiration?.[i] === "number" ? daily.et0_fao_evapotranspiration[i] : null,
         conditionCode: daily.weather_code?.[i] ?? -1,
         conditionText: describeCode(daily.weather_code?.[i]),
       });

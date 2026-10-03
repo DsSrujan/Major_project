@@ -308,4 +308,88 @@ export async function getPlotTwinPrediction(plotId: string): Promise<TwinPredict
   return response.json();
 }
 
+/**
+ * Diagnostic RAG Explainer API for a clicked soil nutrient/parameter.
+ */
+export interface DiagnosticExplainRequestPayload {
+  nutrient?: string;
+  nutrient_label?: string;
+  current_value?: number | null;
+  unit?: string;
+  crop?: string;
+  soil_report_id?: string;
+}
+
+export interface DiagnosticExplainResponsePayload {
+  success: boolean;
+  plot_id: string;
+  nutrient?: string;
+  explanation?: string;
+  weather_summary?: string;
+  pop_message?: string;
+  error?: string;
+  error_code?: string;
+  context_retrieved?: boolean;
+}
+
+export async function explainDiagnosticParameter(
+  plotId: string,
+  payload: DiagnosticExplainRequestPayload
+): Promise<DiagnosticExplainResponsePayload> {
+  const headers = await getHeaders();
+  const response = await fetch(`${API_BASE_URL}/api/recommendations/${encodeURIComponent(plotId)}/explain`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => ({ detail: "Failed to fetch diagnostic explanation" }));
+    throw new Error(errBody.detail || `Server error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Agronomy Conversational Assistant Chat API.
+ */
+export interface ChatMessagePayload {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export interface ChatRequestPayload {
+  plot_id?: string;
+  message: string;
+  crop?: string;
+  history?: ChatMessagePayload[];
+}
+
+export interface ChatResponsePayload {
+  success: boolean;
+  response?: string;
+  pop_message?: string;
+  error?: string;
+  error_code?: string;
+  context_retrieved?: boolean;
+}
+
+export async function sendChatMessage(payload: ChatRequestPayload): Promise<ChatResponsePayload> {
+  const headers = await getHeaders();
+  const response = await fetch(`${API_BASE_URL}/api/chat`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => ({ detail: "Failed to send chat message" }));
+    throw new Error(errBody.detail || `Server error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+
 

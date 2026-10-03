@@ -22,3 +22,6 @@ pytz>=2024.1
 # Required by app/services/satellite_ingestion_service.py (Open-Meteo +
 # Sentinel Hub HTTP calls) and backend/scripts/ingest_real_data.py.
 requests>=2.31,<3
+
+# --- RAG & Vector Embeddings ---
+sentence-transformers>=2.2.0

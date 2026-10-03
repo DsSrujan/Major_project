@@ -56,3 +56,43 @@ class GeospatialServiceUnavailable(NutriPalmError):
     Routers catch this and return an explicit "unavailable / configuration
     required" response instead of fabricating data or crashing.
     """
+
+
+class GroqApiError(NutriPalmError):
+    """
+    Raised when Groq API encounters an error (rate limits, out of tokens,
+    authentication failure, server error, or connection issues).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        pop_message: str = "Groq response failed: API token limit reached or request error.",
+        status_code: int = 502,
+        error_code: str = "GROQ_API_ERROR",
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.pop_message = pop_message
+        self.status_code = status_code
+        self.error_code = error_code
+
+
+class RagKnowledgeBaseError(NutriPalmError):
+    """
+    Raised when vector similarity retrieval fails in Supabase / pgvector.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        pop_message: str = "Agronomy knowledge base retrieval failed.",
+        status_code: int = 503,
+        error_code: str = "RAG_RETRIEVAL_ERROR",
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.pop_message = pop_message
+        self.status_code = status_code
+        self.error_code = error_code
+

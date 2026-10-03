@@ -12,6 +12,7 @@ import { FarmPlotOverviewMap, type BasemapMode, type DataOverlayLayer } from "./
 import { reverseGeocode, getElevation, parseGeoJSONFile, type GeoJSONPolygon } from "../../lib/geo";
 import { boundaryToSvgPath } from "../../lib/svgPath";
 import { useEnvironmentalData } from "../../hooks/useEnvironmentalData";
+import { FloatingAgronomyChat } from "../chat/FloatingAgronomyChat";
 
 
 
@@ -989,6 +990,16 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
         showToast={showToast}
       />
 
+      {/* Floating Agronomy AI Chat Widget */}
+      <FloatingAgronomyChat
+        plotId={selectedPlot?.id}
+        cropName={selectedPlot?.crop || "Oil Palm"}
+        farmerName={selectedPlot?.farmer}
+        showToast={showToast}
+      />
+
+
     </motion.div>
   );
 };
+

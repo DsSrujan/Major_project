@@ -3,13 +3,20 @@ import React, { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Bot, Sparkles, Calendar, AlertTriangle, Leaf, DollarSign,
-  Download, Share2, ClipboardCheck, CloudRain, X, ChevronDown,
+  Download, Share2, CloudRain, X, ChevronDown,
   FileText
 } from "lucide-react";
 import { usePlots } from "../../data/plots";
 import { supabase } from "../../lib/supabaseClient";
 import { getCropBaseline } from "../../constants/cropBaselines";
 import { jsPDF } from "jspdf";
+import { DiagnosticExplanationDrawer } from "../analytics/DiagnosticExplanationDrawer";
+import type { DiagnosticItem } from "../analytics/DiagnosticExplanationDrawer";
+import { FloatingAgronomyChat } from "../chat/FloatingAgronomyChat";
+import { explainDiagnosticParameter } from "../../lib/apiClient";
+import type { DiagnosticExplainResponsePayload } from "../../lib/apiClient";
+import { useEnvironmentalData } from "../../hooks/useEnvironmentalData";
+import { WeatherSmartApplicationAdvisory } from "../analytics/WeatherSmartApplicationAdvisory";
 
 interface RecommendationScreenProps {
   selectedPlotId?: string;
@@ -86,6 +93,12 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
   });
   const [isProcessing, setIsProcessing] = useState(false);
 
+  // RAG Diagnostic Drawer States
+  const [selectedDiagnosticItem, setSelectedDiagnosticItem] = useState<DiagnosticItem | null>(null);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [isDiagnosticLoading, setIsDiagnosticLoading] = useState(false);
+  const [diagnosticData, setDiagnosticData] = useState<DiagnosticExplainResponsePayload | null>(null);
+
   const triggerToast = (msg: string, type: "success" | "info" | "warning" = "success") => {
     if (showToast) {
       showToast(msg, type);
@@ -104,6 +117,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
   }, [selectedPlotId, plots]);
 
   const currentPlot = plots.find((p) => p.id === activePlotId) || plots[0];
+  const envData = useEnvironmentalData(currentPlot);
 
   const generateDynamicRecommendation = useCallback((report: any, targetPlotId?: string) => {
     const plotIdToUse = targetPlotId || report?.plotId || activePlotId;
@@ -501,6 +515,188 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       isMounted = false;
     };
   }, [activePlotId, lastUploadedReport, plots, generateDynamicRecommendation]);
+
+  const handleCardClick = async (item: DiagnosticItem) => {
+    setSelectedDiagnosticItem(item);
+    setIsDrawerOpen(true);
+    setIsDiagnosticLoading(true);
+    setDiagnosticData(null);
+
+    try {
+      const res = await explainDiagnosticParameter(activePlotId, {
+        nutrient: item.key,
+        nutrient_label: item.name,
+        current_value: item.value,
+        unit: item.unit,
+        crop: currentPlot?.crop || "Oil Palm",
+        soil_report_id: activeSoilReport?.id,
+      });
+      setDiagnosticData(res);
+      if (!res.success && res.pop_message) {
+        triggerToast(res.pop_message, "warning");
+      }
+    } catch (err: any) {
+      console.error("Diagnostic explain error:", err);
+      setDiagnosticData({
+        success: false,
+        plot_id: activePlotId,
+        pop_message: "Failed to connect to AI advisory service.",
+        error: err.message,
+      });
+      triggerToast("Failed to connect to AI advisory service.", "warning");
+    } finally {
+      setIsDiagnosticLoading(false);
+    }
+  };
+
+  // Helper to extract raw numbers safely
+  const extractNum = (field: any): number | null => {
+    if (field === null || field === undefined) return null;
+    if (typeof field === "number") return isNaN(field) ? null : field;
+    if (typeof field === "object" && "value" in field) return extractNum(field.value);
+    const parsed = parseFloat(String(field).replace(/[<>=\s]/g, ""));
+    return isNaN(parsed) ? null : parsed;
+  };
+
+  const reportSrc = activeSoilReport || lastUploadedReport;
+  const nVal = extractNum(reportSrc?.nitrogen_kg_ha ?? reportSrc?.nitrogen) ?? 180;
+  const pVal = extractNum(reportSrc?.phosphorus_kg_ha ?? reportSrc?.phosphorus) ?? 18;
+  const kVal = extractNum(reportSrc?.potassium_kg_ha ?? reportSrc?.potassium) ?? 145;
+  const ocVal = extractNum(reportSrc?.organic_carbon_percent ?? reportSrc?.organic_carbon) ?? 0.55;
+  const phVal = extractNum(reportSrc?.ph) ?? 5.8;
+  const ecVal = extractNum(reportSrc?.electrical_conductivity) ?? 0.42;
+  const znVal = extractNum(reportSrc?.zinc) ?? 0.48;
+  const sVal = extractNum(reportSrc?.sulphur) ?? 12.0;
+  const bVal = extractNum(reportSrc?.boron) ?? 0.65;
+  const feVal = extractNum(reportSrc?.iron) ?? 4.2;
+  const mnVal = extractNum(reportSrc?.manganese) ?? 2.8;
+  const cuVal = extractNum(reportSrc?.copper) ?? 0.85;
+
+  const currentCrop = currentPlot?.crop || "Oil Palm";
+  const cropBaseline = getCropBaseline(currentCrop);
+
+  const diagnosticCards: DiagnosticItem[] = [
+    {
+      key: "nitrogen",
+      name: "Available Nitrogen",
+      symbol: "N",
+      value: nVal,
+      unit: "kg/ha",
+      targetRange: `${cropBaseline.nitrogen.min} - ${cropBaseline.nitrogen.max} kg/ha`,
+      status: nVal < cropBaseline.nitrogen.min ? "critical" : nVal > cropBaseline.nitrogen.max ? "excess" : "optimal",
+      category: "macro",
+    },
+    {
+      key: "phosphorus",
+      name: "Available Phosphorus",
+      symbol: "P",
+      value: pVal,
+      unit: "kg/ha",
+      targetRange: `${cropBaseline.phosphorus.min} - ${cropBaseline.phosphorus.max} kg/ha`,
+      status: pVal < cropBaseline.phosphorus.min ? "deficient" : pVal > cropBaseline.phosphorus.max ? "excess" : "optimal",
+      category: "macro",
+    },
+    {
+      key: "potassium",
+      name: "Available Potassium",
+      symbol: "K",
+      value: kVal,
+      unit: "kg/ha",
+      targetRange: `${cropBaseline.potassium.min} - ${cropBaseline.potassium.max} kg/ha`,
+      status: kVal < cropBaseline.potassium.min ? "critical" : kVal > cropBaseline.potassium.max ? "excess" : "optimal",
+      category: "macro",
+    },
+    {
+      key: "organic_carbon",
+      name: "Organic Carbon",
+      symbol: "OC",
+      value: ocVal,
+      unit: "%",
+      targetRange: `>${cropBaseline.organic_carbon.min} %`,
+      status: ocVal < cropBaseline.organic_carbon.min ? "deficient" : "optimal",
+      category: "macro",
+    },
+    {
+      key: "ph",
+      name: "Soil Acidity (pH)",
+      symbol: "pH",
+      value: phVal,
+      unit: "pH",
+      targetRange: `${cropBaseline.ph.min} - ${cropBaseline.ph.max}`,
+      status: phVal < cropBaseline.ph.min || phVal > cropBaseline.ph.max ? "critical" : "optimal",
+      category: "physical",
+    },
+    {
+      key: "electrical_conductivity",
+      name: "Conductivity (EC)",
+      symbol: "EC",
+      value: ecVal,
+      unit: "dS/m",
+      targetRange: "0.50 - 0.75 dS/m",
+      status: ecVal < 0.50 ? "deficient" : ecVal > 0.75 ? "excess" : "optimal",
+      category: "physical",
+    },
+    {
+      key: "zinc",
+      name: "Available Zinc",
+      symbol: "Zn",
+      value: znVal,
+      unit: "mg/kg",
+      targetRange: "> 0.60 mg/kg",
+      status: znVal < 0.60 ? "deficient" : "optimal",
+      category: "micro",
+    },
+    {
+      key: "sulphur",
+      name: "Available Sulphur",
+      symbol: "S",
+      value: sVal,
+      unit: "mg/kg",
+      targetRange: "> 10.0 mg/kg",
+      status: sVal < 10.0 ? "deficient" : "optimal",
+      category: "macro",
+    },
+    {
+      key: "boron",
+      name: "Available Boron",
+      symbol: "B",
+      value: bVal,
+      unit: "mg/kg",
+      targetRange: "0.50 - 1.00 mg/kg",
+      status: bVal < 0.50 ? "deficient" : "optimal",
+      category: "micro",
+    },
+    {
+      key: "iron",
+      name: "Available Iron",
+      symbol: "Fe",
+      value: feVal,
+      unit: "mg/kg",
+      targetRange: "> 4.50 mg/kg",
+      status: feVal < 4.50 ? "deficient" : "optimal",
+      category: "micro",
+    },
+    {
+      key: "manganese",
+      name: "Available Manganese",
+      symbol: "Mn",
+      value: mnVal,
+      unit: "ppm",
+      targetRange: "> 2.00 ppm",
+      status: mnVal < 2.00 ? "deficient" : "optimal",
+      category: "micro",
+    },
+    {
+      key: "copper",
+      name: "Available Copper",
+      symbol: "Cu",
+      value: cuVal,
+      unit: "mg/kg",
+      targetRange: "> 0.20 mg/kg",
+      status: cuVal < 0.20 ? "deficient" : "optimal",
+      category: "micro",
+    },
+  ];
 
   const handleGenerateNew = async () => {
     const reportToUse = activeSoilReport || lastUploadedReport;
@@ -943,11 +1139,8 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
         </div>
       </div>
 
-      {/* ================= LAYOUT GRID ================= */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-
-        {/* LEFT COLUMN: Summary hero card, dosage table, Why explainers, ROI, environmental, timeline (8/12 width) */}
-        <div className="lg:col-span-8 space-y-6">
+      {/* ================= FULL-WIDTH SINGLE-COLUMN STACK ================= */}
+      <div className="flex flex-col space-y-6 w-full">
 
           {/* SECTION 2 — AI Recommendation Summary */}
           <div className="bg-white rounded-3xl border border-gray-150 p-6 shadow-xs relative overflow-hidden flex flex-col justify-between min-h-[200px]">
@@ -957,7 +1150,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
               <div className="flex justify-between items-start">
                 <div>
                   <span className="text-[10px] font-black text-primary uppercase tracking-widest bg-emerald-50 border border-emerald-100/50 px-2.5 py-1 rounded-full">
-                    {recommendationData ? "FastAPI Core Services" : t('recommendationscreen.slow_release_organic_carrier')}
+                    {recommendationData ? "NutriPalm AI Agronomy Engine" : t('recommendationscreen.slow_release_organic_carrier')}
                   </span>
                   <h3 className="text-xl font-black text-gray-900 mt-4">
                     {recommendationData?.explanation?.summary || t('recommendationscreen.npk_20_10_10_organic_compost')}
@@ -999,6 +1192,75 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
                   <span className="text-sm font-black text-indigo-750 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-lg mt-2.5 inline-block">{t('recommendationscreen.within_5_days')}</span>
                 </div>
               </div>
+            </div>
+          </div>
+
+          {/* SECTION 2.5 — Interactive Soil Diagnostics (12 Key Indicators) */}
+          <div className="bg-white rounded-3xl border border-gray-150 p-6 shadow-xs text-left space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 pb-3">
+              <div>
+                <h4 className="text-xs font-black text-gray-900 uppercase tracking-widest flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-emerald-600" />
+                  Interactive Soil Diagnostics (12 Parameters)
+                </h4>
+                <p className="text-[11px] text-gray-500 font-semibold mt-0.5">
+                  Click any card to open the AI RAG Explainer drawer with live Open-Meteo weather guidance
+                </p>
+              </div>
+              <span className="text-[10px] font-extrabold text-emerald-750 bg-emerald-50 border border-emerald-150 px-2.5 py-1 rounded-full w-fit">
+                KAU Package of Practices
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+              {diagnosticCards.map((card) => {
+                const isSelected = selectedDiagnosticItem?.key === card.key && isDrawerOpen;
+                return (
+                  <motion.div
+                    key={card.key}
+                    whileHover={{ y: -3, transition: { duration: 0.15 } }}
+                    whileTap={{ scale: 0.97 }}
+                    onClick={() => handleCardClick(card)}
+                    className={`rounded-2xl p-3.5 border transition-all cursor-pointer relative overflow-hidden flex flex-col justify-between min-h-[125px] ${
+                      isSelected
+                        ? "bg-emerald-50/70 border-emerald-500 shadow-md ring-2 ring-emerald-500/20"
+                        : "bg-gray-50/60 hover:bg-white border-gray-150 hover:border-emerald-300 hover:shadow-sm"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="w-7 h-7 rounded-xl bg-white border border-gray-200/80 font-black text-[10px] text-emerald-750 flex items-center justify-center shadow-2xs">
+                        {card.symbol}
+                      </span>
+                      <span
+                        className={`text-[8px] font-black uppercase px-1.5 py-0.5 rounded-md ${
+                          card.status === "critical"
+                            ? "bg-rose-100/80 text-rose-700"
+                            : card.status === "deficient"
+                            ? "bg-amber-100/80 text-amber-800"
+                            : "bg-emerald-100/80 text-emerald-800"
+                        }`}
+                      >
+                        {card.status}
+                      </span>
+                    </div>
+
+                    <div className="my-1.5">
+                      <span className="text-[10px] font-extrabold text-gray-650 block line-clamp-1">
+                        {card.name}
+                      </span>
+                      <span className="text-base font-black text-gray-950 mt-0.5 block">
+                        {card.value !== null ? `${card.value}` : "N/A"}{" "}
+                        <span className="text-[9px] font-bold text-gray-400 font-mono">{card.unit}</span>
+                      </span>
+                    </div>
+
+                    <div className="pt-1.5 border-t border-gray-200/50 flex items-center justify-between text-[8px] font-bold text-gray-400">
+                      <span>Ideal: {card.targetRange.split(" ")[0]}</span>
+                      <span className="text-emerald-700 font-extrabold hover:underline">Explain →</span>
+                    </div>
+                  </motion.div>
+                );
+              })}
             </div>
           </div>
 
@@ -1060,7 +1322,15 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
             </div>
           </div>
 
-          {/* SECTION 4 — Why AI Generated This (AI Reasoning) */}
+          {/* SECTION 4.5 — 6–7 Day Weather-Smart Application Suitability & Leaching Advisory */}
+          <WeatherSmartApplicationAdvisory
+            weather={envData.weather}
+            isLoading={envData.weatherLoading}
+            cropName={currentPlot?.crop || "Oil Palm"}
+            onRefresh={envData.refresh}
+          />
+
+          {/* SECTION 5 — Why AI Generated This (AI Reasoning) */}
           <div className="space-y-4">
             <h4 className="text-xs font-black text-gray-400 uppercase tracking-widest text-left">{t('recommendationscreen.model_explainability_reasoning')}</h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1357,140 +1627,107 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
             </div>
           </div>
 
-        </div>
+        {/* SECTION 8 — AI Confidence Matrices & Prescription History Logs (Companion Cards) */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full">
 
-        {/* RIGHT COLUMN: Confidence breakdowns, timeline history, Actions list (4/12 width) */}
-        <div className="lg:col-span-4 space-y-6">
-
-          {/* SECTION 9 — AI Confidence Breakdown */}
+          {/* SECTION 8A — AI Confidence Breakdown */}
           <div className="bg-white rounded-3xl border border-gray-150 p-6 shadow-xs text-left space-y-5">
-            <div className="flex justify-between items-center border-b border-gray-100 pb-2">
-              <h4 className="text-[10px] font-black text-gray-450 uppercase tracking-widest">{t('recommendationscreen.ai_confidence_matrices')}</h4>
-              <span className="text-[10px] font-black text-emerald-650">{t('recommendationscreen.96_overall')}</span>
+            <div className="flex justify-between items-center border-b border-gray-100 pb-3">
+              <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-primary" />
+                {t('recommendationscreen.ai_confidence_matrices')}
+              </h4>
+              <span className="text-[10px] font-black text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+                {t('recommendationscreen.96_overall')}
+              </span>
             </div>
 
-            <div className="space-y-3.5 text-xs text-gray-700 font-semibold">
-              <div className="space-y-1">
+            <div className="space-y-4 text-xs text-gray-700 font-semibold">
+              <div className="space-y-1.5">
                 <div className="flex justify-between font-bold">
                   <span>{t('recommendationscreen.soil_diagnostics_report_data')}</span>
-                  <span>98%</span>
+                  <span className="text-gray-900 font-black">98%</span>
                 </div>
-                <div className="w-full h-1 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-primary" style={{ width: "98%" }} />
+                <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-primary rounded-full" style={{ width: "98%" }} />
                 </div>
               </div>
 
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <div className="flex justify-between font-bold">
                   <span>{t('recommendationscreen.weather_forecast_telemetry_data')}</span>
-                  <span>94%</span>
+                  <span className="text-gray-900 font-black">94%</span>
                 </div>
-                <div className="w-full h-1 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-primary" style={{ width: "94%" }} />
+                <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-primary rounded-full" style={{ width: "94%" }} />
                 </div>
               </div>
 
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <div className="flex justify-between font-bold">
                   <span>{t('recommendationscreen.biophysical_digital_twin_simulations')}</span>
-                  <span>96%</span>
+                  <span className="text-gray-900 font-black">96%</span>
                 </div>
-                <div className="w-full h-1 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-primary" style={{ width: "96%" }} />
+                <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-primary rounded-full" style={{ width: "96%" }} />
                 </div>
               </div>
 
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <div className="flex justify-between font-bold">
                   <span>{t('recommendationscreen.in_situ_iot_telemetry_variables')}</span>
-                  <span>91%</span>
+                  <span className="text-gray-900 font-black">91%</span>
                 </div>
-                <div className="w-full h-1 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-primary" style={{ width: "91%" }} />
+                <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-primary rounded-full" style={{ width: "91%" }} />
                 </div>
               </div>
 
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <div className="flex justify-between font-bold">
                   <span>{t('recommendationscreen.regional_crop_yield_datasets')}</span>
-                  <span>95%</span>
+                  <span className="text-gray-900 font-black">95%</span>
                 </div>
-                <div className="w-full h-1 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-primary" style={{ width: "95%" }} />
+                <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-primary rounded-full" style={{ width: "95%" }} />
                 </div>
               </div>
             </div>
           </div>
 
-          {/* SECTION 10 — Action Buttons */}
-          <div className="bg-white border border-gray-150 rounded-3xl p-5 shadow-xs text-left space-y-2.5">
-            <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-widest border-b border-gray-100 pb-2">
-
-              {t('recommendationscreen.advisory_actions_suite')}
-            </h4>
-
-            <button
-              onClick={() => triggerToast("Recommendation scheduled and synced with agronomist logs.", "success")}
-              className="w-full bg-primary hover:bg-[#235F26] text-white font-extrabold py-3.5 rounded-xl transition-all shadow-xs text-xs flex items-center justify-center gap-1.5 border-0 cursor-pointer animate-pulse"
-            >
-              <ClipboardCheck className="w-4 h-4" />
-
-              {t('recommendationscreen.accept_recommendation')}
-            </button>
-
-            <button
-              onClick={() => triggerToast("Redirecting to prescription modifier form...", "info")}
-              className="w-full bg-white hover:bg-gray-50 border border-gray-250 text-gray-800 font-extrabold py-3 rounded-xl transition-all text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-            >
-
-              {t('recommendationscreen.modify_recommendation')}
-            </button>
-
-            <button
-              onClick={() => triggerToast("Synced scheduled fertilization triggers.", "success")}
-              className="w-full bg-white hover:bg-gray-50 border border-gray-250 text-gray-800 font-extrabold py-3 rounded-xl transition-all text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-            >
-              <Calendar className="w-4 h-4 text-primary" />
-
-              {t('recommendationscreen.schedule_application')}
-            </button>
-
-            <button
-              onClick={handleExportPDF}
-              className="w-full bg-white hover:bg-gray-50 border border-gray-250 text-gray-800 font-extrabold py-3 rounded-xl transition-all text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-            >
-              <Download className="w-4 h-4 text-primary" />
-
-              {t('recommendationscreen.download_advisory_pdf')}
-            </button>
-          </div>
-
-          {/* SECTION 11 — Recommendation History */}
-          <div className="bg-white rounded-3xl border border-gray-150 p-6 shadow-xs text-left space-y-4">
-            <h4 className="text-[10px] font-black text-gray-450 uppercase tracking-widest border-b border-gray-100 pb-2">
-
-              {t('recommendationscreen.prescription_history_logs')}
-            </h4>
+          {/* SECTION 8B — Prescription History Logs */}
+          <div className="bg-white rounded-3xl border border-gray-150 p-6 shadow-xs text-left space-y-5">
+            <div className="flex justify-between items-center border-b border-gray-100 pb-3">
+              <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest flex items-center gap-1.5">
+                <Calendar className="w-3.5 h-3.5 text-primary" />
+                {t('recommendationscreen.prescription_history_logs')}
+              </h4>
+              <span className="text-[10px] font-bold text-gray-400">
+                Verified Records
+              </span>
+            </div>
 
             <div className="space-y-4">
-              <div className="flex items-start gap-2.5 text-xs text-gray-700 font-semibold leading-relaxed">
-                <span className="text-emerald-500 mt-0.5">✓</span>
-                <div className="flex-grow space-y-0.5">
+              <div className="flex items-start gap-3 text-xs text-gray-700 font-semibold leading-relaxed p-3 rounded-2xl bg-gray-50/70 border border-gray-100">
+                <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-black text-[10px] shrink-0 mt-0.5">
+                  ✓
+                </span>
+                <div className="flex-grow space-y-1">
                   <p className="text-gray-900 font-bold">{t('recommendationscreen.12_jul_npk_mix_b_broadcast')}</p>
                   <p className="text-[10px] text-gray-500 leading-normal">
-
-                    {t('recommendationscreen.status')} <strong className="text-emerald-650 font-extrabold">{t('recommendationscreen.completed')}</strong>  {t('recommendationscreen.result')} <strong>{t('recommendationscreen.9_yield')}</strong>  {t('recommendationscreen.conf_95')}
+                    {t('recommendationscreen.status')} <strong className="text-emerald-700 font-extrabold">{t('recommendationscreen.completed')}</strong> • {t('recommendationscreen.result')} <strong>{t('recommendationscreen.9_yield')}</strong> • {t('recommendationscreen.conf_95')}
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-start gap-2.5 text-xs text-gray-700 font-semibold leading-relaxed border-t border-gray-50 pt-3">
-                <span className="text-emerald-500 mt-0.5">✓</span>
-                <div className="flex-grow space-y-0.5">
+              <div className="flex items-start gap-3 text-xs text-gray-700 font-semibold leading-relaxed p-3 rounded-2xl bg-gray-50/70 border border-gray-100">
+                <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-black text-[10px] shrink-0 mt-0.5">
+                  ✓
+                </span>
+                <div className="flex-grow space-y-1">
                   <p className="text-gray-900 font-bold">{t('recommendationscreen.28_jun_organic_compost_layer')}</p>
                   <p className="text-[10px] text-gray-500 leading-normal">
-
-                    {t('recommendationscreen.status')} <strong className="text-emerald-650 font-extrabold">{t('recommendationscreen.completed')}</strong>  {t('recommendationscreen.result')} <strong>{t('recommendationscreen.soil_humus_gain')}</strong>  {t('recommendationscreen.conf_97')}
+                    {t('recommendationscreen.status')} <strong className="text-emerald-700 font-extrabold">{t('recommendationscreen.completed')}</strong> • {t('recommendationscreen.result')} <strong>{t('recommendationscreen.soil_humus_gain')}</strong> • {t('recommendationscreen.conf_97')}
                   </p>
                 </div>
               </div>
@@ -1501,6 +1738,26 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
 
       </div>
 
+      {/* Interactive RAG Diagnostic Slide-Over Drawer */}
+      <DiagnosticExplanationDrawer
+        isOpen={isDrawerOpen}
+        onClose={() => setIsDrawerOpen(false)}
+        item={selectedDiagnosticItem}
+        cropName={currentPlot?.crop || "Oil Palm"}
+        isLoading={isDiagnosticLoading}
+        data={diagnosticData}
+        onRetry={() => selectedDiagnosticItem && handleCardClick(selectedDiagnosticItem)}
+      />
+
+      {/* Floating Agronomy AI Chat Widget */}
+      <FloatingAgronomyChat
+        plotId={activePlotId}
+        cropName={currentPlot?.crop || "Oil Palm"}
+        farmerName={farmerName || currentPlot?.farmer}
+        showToast={triggerToast}
+      />
+
     </motion.div>
   );
 };
+

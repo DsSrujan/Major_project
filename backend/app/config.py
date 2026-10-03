@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     poppler_path: str = ""
     tesseract_cmd: str = ""
 
+    # --- LLM API ---
+    groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-120b"
+
     # --- App ---
     environment: str = "development"
     api_v1_prefix: str = "/api"
