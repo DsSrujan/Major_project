@@ -1019,6 +1019,7 @@
   "digitaltwinscreen.stable_ambient_humidity_index_64": "ಸ್ಥಿರ ಸುತ್ತುವರಿದ ಆರ್ದ್ರತೆ ಸೂಚ್ಯಂಕ (64%)",
   "digitaltwinscreen.ndvi_greenness_ratio_meets_chlorophyll_e": "NDVI ಹಸಿರುತನದ ಅನುಪಾತವು ಕ್ಲೋರೊಫಿಲ್ ನಿರೀಕ್ಷೆಗಳನ್ನು ಪೂರೈಸುತ್ತದೆ",
   "digitaltwinscreen.soil_chemical_matrix": "ಮಣ್ಣಿನ ರಾಸಾಯನಿಕ ಮ್ಯಾಟ್ರಿಕ್ಸ್",
+  "digitaltwinscreen.attach_soil_report_to_view_live_data": "ಲೈವ್ ಡೇಟಾವನ್ನು ವೀಕ್ಷಿಸಲು ಮಣ್ಣಿನ ವರದಿಯನ್ನು ಲಗತ್ತಿಸಿ",
   "digitaltwinscreen.ai_agronomy_advisory": "AI ಕೃಷಿ ವಿಜ್ಞಾನ ಸಲಹೆ",
   "digitaltwinscreen.confidence": "% ವಿಶ್ವಾಸ",
   "digitaltwinscreen.no_ai_analysis_yet_attach_a_soil_report_": "ಇನ್ನೂ AI ವಿಶ್ಲೇಷಣೆ ಇಲ್ಲ - ಶಿಫಾರಸನ್ನು ರಚಿಸಲು ಮಣ್ಣಿನ ವರದಿಯನ್ನು ಲಗತ್ತಿಸಿ.",

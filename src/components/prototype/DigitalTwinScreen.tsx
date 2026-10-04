@@ -1,12 +1,14 @@
 import { useTranslation } from "../../translation/useTranslation";
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { TrendingUp, Activity, Thermometer, Droplets, FlaskConical, ChevronRight, Bot, Cpu, RefreshCw, Download, X, Calendar } from "lucide-react";
+import { TrendingUp, Activity, Thermometer, Droplets, FlaskConical, ChevronRight, Bot, Cpu, RefreshCw, Download, X, Calendar, Upload } from "lucide-react";
 import { usePlots } from "../../data/plots";
 import { boundaryToSvgPath } from "../../lib/svgPath";
 import { AnimatedCounter } from "./FarmPlotScreen";
 import { useDigitalTwinSnapshots, useTwinPrediction, useDigitalTwinHistory, useLiveTwin } from "../../data/digitalTwins";
 import { useEnvironmentalData } from "../../hooks/useEnvironmentalData";
+import { CropDigitalTwinVisual, getGrowthStageArchetype, calculateDaysSincePlanting, type CropGrowthArchetype } from "./CropDigitalTwinVisual";
+import { usePlotSoilReport } from "../../hooks/usePlotSoilReport";
 
 
 
@@ -31,6 +33,7 @@ export const DigitalTwinScreen: React.FC<DigitalTwinScreenProps> = ({
   const { t } = useTranslation();
   const [activePlotId, setActivePlotId] = useState("");
   const [simMode, setSimMode] = useState<"Past" | "Current" | "Prediction">("Current");
+  const [previewStageOverride, setPreviewStageOverride] = useState<CropGrowthArchetype | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isExportLoading, setIsExportLoading] = useState(false);
@@ -64,6 +67,7 @@ export const DigitalTwinScreen: React.FC<DigitalTwinScreenProps> = ({
   const handleSync = () => {
     setIsSyncing(true);
     envData.refresh();
+    refetchSoilReport();
     setTimeout(() => {
       setIsSyncing(false);
       setLastSyncMinutes(0);
@@ -74,6 +78,7 @@ export const DigitalTwinScreen: React.FC<DigitalTwinScreenProps> = ({
   const handlePlotSwitch = (id: string) => {
     setIsChangingPlot(true);
     setActivePlotId(id);
+    setPreviewStageOverride(null);
     setTimeout(() => {
       setIsChangingPlot(false);
       triggerToast(`Calibrated twin workspace to Plot ${id.toUpperCase()}`, "info");
@@ -83,6 +88,7 @@ export const DigitalTwinScreen: React.FC<DigitalTwinScreenProps> = ({
   const handleSimModeSwitch = (mode: "Past" | "Current" | "Prediction") => {
     setIsChangingPlot(true);
     setSimMode(mode);
+    setPreviewStageOverride(null);
     setTimeout(() => {
       setIsChangingPlot(false);
       triggerToast(`Simulating ${mode.toUpperCase()} timeline telemetry...`, "info");
@@ -111,6 +117,7 @@ export const DigitalTwinScreen: React.FC<DigitalTwinScreenProps> = ({
   
   const activeSnapshot = snapshots[simMode];
   const envData = useEnvironmentalData(activePlot);
+  const { hasReport: hasSoilReport, metrics: soilReportMetrics, refetch: refetchSoilReport } = usePlotSoilReport(activePlotId, activePlot);
 
   if (plots.length === 0 || !activePlot) {
     return (
@@ -146,6 +153,31 @@ export const DigitalTwinScreen: React.FC<DigitalTwinScreenProps> = ({
   const activeWhyDisease = activeSnapshot?.disease_explanation ?? activePlot?.whyDisease;
   const activeRecommendedAction = activeSnapshot?.recommended_action ?? activePlot?.recommendedAction;
   const activeAdvisoryReason = activeSnapshot?.advisory_reason ?? activePlot?.advisoryReason;
+
+  // Physiological timeline calculation:
+  // Derived directly from plot plantingDate or plantation age (age * 365), matching 1095 days for 3-yr mature crops
+  const daysSincePlanting = calculateDaysSincePlanting(activePlot);
+
+  // Derive biological growth stage from timeline data (days, age, stage, and simulation mode)
+  const computedGrowthStage = getGrowthStageArchetype(
+    activeSnapshot?.growth_stage || activePlot?.stage,
+    activePlot?.age,
+    daysSincePlanting,
+    simMode
+  );
+  const activeGrowthStage: CropGrowthArchetype = previewStageOverride || computedGrowthStage;
+
+  // Expected harvest date calculated from planting date / physiological timeline
+  const expectedHarvestDate = (() => {
+    if (activePlot?.plantingDate) {
+      const d = new Date(activePlot.plantingDate);
+      if (!isNaN(d.getTime())) {
+        const harvestDate = new Date(d.getTime() + 3.5 * 365.25 * 24 * 60 * 60 * 1000);
+        return harvestDate.toLocaleDateString("en-US", { month: "short", year: "numeric" });
+      }
+    }
+    return "Oct 2026";
+  })();
 
   // Live weather: prefer useLiveTwin, fallback to useEnvironmentalData
   const realTemp = liveData?.live_weather.temperature_c ?? (envData.weather ? envData.weather.current.temperatureC : null);
@@ -261,15 +293,25 @@ export const DigitalTwinScreen: React.FC<DigitalTwinScreenProps> = ({
     }
   ];
 
-  // Soil Nutrient horizontal values
-  const soilNutrients = [
-    { label: t('digitaltwinscreen.ph_score'), val: "6.2", pct: 85, color: "bg-emerald-500", text: t('digitaltwinscreen.optimal_slightly_acidic') },
-    { label: t('digitaltwinscreen.nitrogen_n'), val: "72 ppm", pct: 72, color: "bg-emerald-500", text: t('digitaltwinscreen.optimal_concentration') },
-    { label: t('digitaltwinscreen.phosphorus_p'), val: "48 ppm", pct: 48, color: "bg-amber-500", text: t('digitaltwinscreen.deficient__recommended_boost') },
-    { label: t('digitaltwinscreen.potassium_k'), val: "85 ppm", pct: 85, color: "bg-emerald-500", text: t('digitaltwinscreen.optimal_content') },
-    { label: t('digitaltwinscreen.organic_carbon'), val: "1.4%", pct: 78, color: "bg-emerald-500", text: t('digitaltwinscreen.excellent_microbial_base') },
-    { label: t('digitaltwinscreen.ec_electrical_conductivity'), val: "0.28 dS/m", pct: 52, color: "bg-emerald-500", text: t('digitaltwinscreen.optimal_salinity') }
-  ];
+  // Soil Nutrient horizontal values derived from real soil report, eliminating mock data
+  const soilNutrients = soilReportMetrics.map((m) => {
+    let localizedLabel = m.label;
+    if (m.key === "ph") localizedLabel = t('digitaltwinscreen.ph_score');
+    else if (m.key === "nitrogen") localizedLabel = t('digitaltwinscreen.nitrogen_n');
+    else if (m.key === "phosphorus") localizedLabel = t('digitaltwinscreen.phosphorus_p');
+    else if (m.key === "potassium") localizedLabel = t('digitaltwinscreen.potassium_k');
+    else if (m.key === "organic_carbon") localizedLabel = t('digitaltwinscreen.organic_carbon');
+    else if (m.key === "ec") localizedLabel = t('digitaltwinscreen.ec_electrical_conductivity');
+
+    return {
+      label: localizedLabel,
+      val: m.displayVal,
+      pct: m.pct,
+      color: m.color,
+      text: m.isMissing ? t('digitaltwinscreen.attach_soil_report_to_view_live_data') : m.statusText,
+      isMissing: m.isMissing
+    };
+  });
 
   // Build a real SVG path from the history array for the chart
   const buildPathFromHistory = (getValue: (row: any) => number | null, scale: number, baseline: number) => {
@@ -705,73 +747,41 @@ export const DigitalTwinScreen: React.FC<DigitalTwinScreenProps> = ({
               </div>
             </div>
 
-            <div className="my-10 flex justify-center items-center relative h-64">
-              <motion.div
-                animate={{ top: ["10%", "90%", "10%"] }}
-                transition={{ duration: 4.5, repeat: Infinity, ease: "linear" }}
-                className="absolute left-10 right-10 h-[1.5px] bg-emerald-400/20 shadow-lg shadow-emerald-400/50 z-10 pointer-events-none"
-              />
+            {/* Dynamic Reactive Crop Growth Model & Interactive Hotspots */}
+            <CropDigitalTwinVisual
+              stage={activeGrowthStage}
+              age={activePlot.age}
+              daysSincePlanting={daysSincePlanting}
+              simMode={simMode}
+              foliarHealth={realFoliar}
+              ndvi={activeNDVI}
+              waterStress={liveWaterStress}
+              yieldEst={activeYield}
+              harvestReadyPct={72}
+              telemetryBadges={telemetryBadges}
+              hoveredBadge={hoveredBadge}
+              onHoverBadge={setHoveredBadge}
+              onBadgeClick={(badge) => triggerToast(`${badge.label}: ${badge.value} (${badge.interpretation})`, "info")}
+              previewStageOverride={previewStageOverride}
+              onSelectStageOverride={setPreviewStageOverride}
+            />
 
-              <svg className="w-full h-full max-w-xs relative z-10" viewBox="0 0 200 200">
-                <line x1="10" y1="50" x2="190" y2="50" stroke="rgba(16, 185, 129, 0.05)" strokeDasharray="3 3" />
-                <line x1="10" y1="140" x2="190" y2="140" stroke="rgba(16, 185, 129, 0.05)" strokeDasharray="3 3" />
-
-                <g style={{ transformOrigin: "100px 150px" }}>
-                  <path d="M 100 150 C 95 165 80 170 78 185 M 100 150 C 105 165 120 170 122 185" stroke="#7c2d12" strokeWidth="2.5" fill="none" strokeLinecap="round" />
-                  <rect x="96" y="105" width="8" height="45" fill="#5c3a21" rx="1.5" />
-                  <path d="M 100 105 C 60 90 35 90 20 115" fill="none" stroke="#2e7d32" strokeWidth="3" strokeLinecap="round" />
-                  <path d="M 100 105 C 140 90 165 90 180 115" fill="none" stroke="#2e7d32" strokeWidth="3" strokeLinecap="round" />
-                  <path d="M 100 105 C 80 75 70 50 85 30" fill="none" stroke="#2e7d32" strokeWidth="2" strokeLinecap="round" />
-                  <path d="M 100 105 C 120 75 130 50 115 30" fill="none" stroke="#2e7d32" strokeWidth="2" strokeLinecap="round" />
-                  <path d="M 100 105 C 95 65 95 45 100 25" fill="none" stroke="#66bb6a" strokeWidth="2.5" strokeLinecap="round" />
-                </g>
-
-                <polygon points="50,40 150,40 100,160" fill="rgba(16, 185, 129, 0.02)" stroke="rgba(16, 185, 129, 0.04)" strokeWidth="1" />
-              </svg>
-
-              {telemetryBadges.map((badge) => (
-                <div
-                  key={badge.id}
-                  style={{ top: `${badge.y}%`, left: `${badge.x}%` }}
-                  className="absolute z-20"
-                >
-                  <button
-                    onMouseEnter={() => setHoveredBadge(badge.id)}
-                    onMouseLeave={() => setHoveredBadge(null)}
-                    onClick={() => triggerToast(`${badge.label}: ${badge.value} (${badge.interpretation})`, "info")}
-                    className="w-3.5 h-3.5 rounded-full bg-emerald-400 hover:bg-white border-2 border-slate-950 flex items-center justify-center cursor-pointer shadow-md shadow-emerald-500/20 active:scale-95 transition-all animate-pulse"
-                  />
-
-                  <AnimatePresence>
-                    {hoveredBadge === badge.id && (
-                      <motion.div
-                        initial={{ opacity: 0, scale: 0.9, y: 5 }}
-                        animate={{ opacity: 1, scale: 1, y: -10 }}
-                        exit={{ opacity: 0, scale: 0.9, y: 5 }}
-                        className="absolute bottom-6 left-1/2 -translate-x-1/2 w-44 bg-slate-900/95 backdrop-blur-md p-3 rounded-2xl border border-slate-800 shadow-2xl z-30 pointer-events-none text-left"
-                      >
-                        <p className="text-[10px] font-black text-emerald-400 uppercase tracking-wider">{badge.label}</p>
-                        <p className="text-sm font-black text-white mt-1 leading-none">{badge.value}</p>
-                        <p className="text-[9px] text-slate-400 leading-normal mt-1">{badge.interpretation}</p>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              ))}
-            </div>
-
-            <div className="grid grid-cols-3 gap-2 bg-slate-900/75 border border-slate-800 rounded-2xl p-4 text-xs font-mono text-slate-400">
+            <div className="grid grid-cols-3 gap-2 bg-slate-900/75 border border-slate-800 rounded-2xl p-4 text-xs font-mono text-slate-400 mt-2">
               <div>
                 <span className="block text-[8px] text-slate-500 uppercase">Crop Vigor</span>
-                <span className="text-white font-bold">Foliar Chlorophyll: 78%</span>
+                <span className="text-white font-bold">Foliar Chlorophyll: {Math.round(realFoliar)}%</span>
               </div>
               <div>
                 <span className="block text-[8px] text-slate-500 uppercase">Water Transport</span>
-                <span className="text-white font-bold">Root Tension: Optimal</span>
+                <span className="text-white font-bold">
+                  Root Tension: {liveWaterStress > 60 ? "High Stress" : liveWaterStress > 30 ? "Moderate" : "Optimal"}
+                </span>
               </div>
               <div>
                 <span className="block text-[8px] text-slate-500 uppercase">Growth Stage</span>
-                <span className="text-white font-bold">{activePlot.stage}</span>
+                <span className="text-white font-bold">
+                  {activeGrowthStage} ({daysSincePlanting} days · {activePlot.age ? `${activePlot.age} yrs` : "Active"})
+                </span>
               </div>
             </div>
             
@@ -835,44 +845,108 @@ export const DigitalTwinScreen: React.FC<DigitalTwinScreenProps> = ({
           {/* 5. CROP GROWTH TIMELINE */}
           <div className="bg-white rounded-3xl border border-gray-150 p-6 shadow-xs text-left space-y-6">
             <div className="flex justify-between items-center pb-3 border-b border-gray-100">
-              <h4 className="text-xs font-black text-gray-900 uppercase tracking-widest flex items-center gap-1.5">
-                <Calendar className="w-4.5 h-4.5 text-primary" /> Crop Growth Timeline
-              </h4>
+              <div className="flex items-center gap-2.5">
+                <h4 className="text-xs font-black text-gray-900 uppercase tracking-widest flex items-center gap-1.5">
+                  <Calendar className="w-4.5 h-4.5 text-primary" /> Crop Growth Timeline
+                </h4>
+                {previewStageOverride && (
+                  <button
+                    onClick={() => setPreviewStageOverride(null)}
+                    className="text-[9px] font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-0.5 rounded-full transition-all cursor-pointer flex items-center gap-1"
+                    title="Reset to active plot growth stage"
+                  >
+                    Reset preview
+                  </button>
+                )}
+              </div>
               <div className="text-[10px] font-bold text-gray-500 space-x-3">
-                <span>Days since planting: <strong>{activePlot.age * 365}</strong></span>
-                <span>Expected Harvest: <strong>Oct 2026</strong></span>
+                <span>Days since planting: <strong>{daysSincePlanting}</strong></span>
+                <span>Expected Harvest: <strong>{expectedHarvestDate}</strong></span>
               </div>
             </div>
 
             <div className="flex justify-between items-center relative pt-2">
               <div className="absolute left-[30px] right-[30px] top-[14px] h-0.5 bg-gray-100 -z-10" />
-              <div className="absolute left-[30px] top-[14px] h-0.5 bg-primary -z-10 w-[74%]" />
+              <div
+                className="absolute left-[30px] top-[14px] h-0.5 bg-primary -z-10 transition-all duration-500"
+                style={{
+                  width:
+                    activeGrowthStage === "Seedling" ? "0%" :
+                    activeGrowthStage === "Vegetative" ? "25%" :
+                    activeGrowthStage === "Flowering" ? "50%" :
+                    activeGrowthStage === "Fruit Dev" ? "74%" : "100%"
+                }}
+              />
 
-              <div className="flex flex-col items-center">
-                <div className="w-8 h-8 rounded-full border-2 bg-emerald-50 border-primary text-primary flex items-center justify-center font-bold text-xs">✓</div>
-                <span className="text-[10px] font-bold text-gray-400 mt-2">Seedling</span>
-              </div>
+              {[
+                { step: 1, id: "Seedling" as const, label: "Seedling" },
+                { step: 2, id: "Vegetative" as const, label: "Vegetative" },
+                { step: 3, id: "Flowering" as const, label: "Flowering" },
+                { step: 4, id: "Fruit Dev" as const, label: "Fruit Dev" },
+                { step: 5, id: "Harvest" as const, label: "Harvest" },
+              ].map((s, idx) => {
+                const stepArchetypeIndex =
+                  activeGrowthStage === "Seedling" ? 0 :
+                  activeGrowthStage === "Vegetative" ? 1 :
+                  activeGrowthStage === "Flowering" ? 2 :
+                  activeGrowthStage === "Fruit Dev" ? 3 : 4;
 
-              <div className="flex flex-col items-center">
-                <div className="w-8 h-8 rounded-full border-2 bg-emerald-50 border-primary text-primary flex items-center justify-center font-bold text-xs">✓</div>
-                <span className="text-[10px] font-bold text-gray-400 mt-2">Vegetative</span>
-              </div>
+                const isCompleted = idx < stepArchetypeIndex;
+                const isCurrent = idx === stepArchetypeIndex;
+                const isInteractive = s.id !== "Harvest";
 
-              <div className="flex flex-col items-center">
-                <div className="w-8 h-8 rounded-full border-2 bg-emerald-50 border-primary text-primary flex items-center justify-center font-bold text-xs">✓</div>
-                <span className="text-[10px] font-bold text-gray-400 mt-2">Flowering</span>
-              </div>
+                return (
+                  <div
+                    key={s.id}
+                    onClick={() => {
+                      if (!isInteractive) return;
+                      setPreviewStageOverride(previewStageOverride === s.id ? null : (s.id as CropGrowthArchetype));
+                    }}
+                    className={`flex flex-col items-center select-none ${
+                      isInteractive ? "cursor-pointer group" : "cursor-default"
+                    }`}
+                    title={isInteractive ? `Click to preview ${s.label} stage` : undefined}
+                  >
+                    {isCompleted ? (
+                      <div className="w-8 h-8 rounded-full border-2 bg-emerald-50 border-primary text-primary flex items-center justify-center font-bold text-xs group-hover:scale-105 transition-all">
+                        ✓
+                      </div>
+                    ) : isCurrent ? (
+                      <div className="w-8 h-8 rounded-full border-2 bg-primary border-primary text-white flex items-center justify-center font-bold text-xs shadow-md shadow-primary/20 scale-110">
+                        {s.step}
+                      </div>
+                    ) : (
+                      <div className="w-8 h-8 rounded-full border-2 bg-white border-gray-200 text-gray-300 flex items-center justify-center font-bold text-xs group-hover:border-gray-400 group-hover:text-gray-500 transition-all">
+                        {s.step}
+                      </div>
+                    )}
 
-              <div className="flex flex-col items-center">
-                <div className="w-8 h-8 rounded-full border-2 bg-primary border-primary text-white flex items-center justify-center font-bold text-xs shadow-md shadow-primary/20 scale-110">4</div>
-                <span className="text-[10px] font-black text-primary mt-2">Fruit Dev</span>
-                <span className="text-[8px] font-mono text-emerald-650 font-bold mt-0.5">82% Completed</span>
-              </div>
+                    <span
+                      className={`text-[10px] mt-2 transition-colors ${
+                        isCurrent
+                          ? "font-black text-primary"
+                          : isCompleted
+                          ? "font-bold text-gray-500 group-hover:text-gray-900"
+                          : "font-bold text-gray-300"
+                      }`}
+                    >
+                      {s.label}
+                    </span>
 
-              <div className="flex flex-col items-center">
-                <div className="w-8 h-8 rounded-full border-2 bg-white border-gray-200 text-gray-300 flex items-center justify-center font-bold text-xs">5</div>
-                <span className="text-[10px] font-bold text-gray-300 mt-2">Harvest</span>
-              </div>
+                    {isCurrent && (
+                      <span className="text-[8px] font-mono text-emerald-650 font-bold mt-0.5">
+                        {s.id === "Fruit Dev"
+                          ? "82% Completed"
+                          : s.id === "Flowering"
+                          ? "Inflorescence Active"
+                          : s.id === "Vegetative"
+                          ? "Canopy Flush"
+                          : "Active Sprout"}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -1162,25 +1236,84 @@ export const DigitalTwinScreen: React.FC<DigitalTwinScreenProps> = ({
           </div>
 
           {/* 4. SOIL HEALTH ANALYSIS */}
-          <div className="bg-white rounded-3xl border border-gray-150 p-6 shadow-xs text-left space-y-5">
-            <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-widest border-b border-gray-100 pb-2">
-              {t('digitaltwinscreen.soil_chemical_matrix')}
-            </h4>
-
-            <div className="space-y-3 text-xs">
-              {soilNutrients.map((nut) => (
-                <div key={nut.label} className="space-y-1.5">
-                  <div className="flex justify-between font-bold text-gray-700">
-                    <span>{nut.label}</span>
-                    <span className="text-gray-900">{nut.val}</span>
-                  </div>
-                  <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                    <div className={`h-full ${nut.color}`} style={{ width: `${nut.pct}%` }} />
-                  </div>
-                  <p className="text-[9px] text-gray-450 leading-none">{nut.text}</p>
-                </div>
-              ))}
+          <div className="bg-white rounded-3xl border border-gray-150 p-6 shadow-xs text-left space-y-4">
+            <div className="flex justify-between items-center border-b border-gray-100 pb-2">
+              <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                {t('digitaltwinscreen.soil_chemical_matrix')}
+              </h4>
+              {hasSoilReport ? (
+                <span className="text-[9px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Verified Lab Report
+                </span>
+              ) : (
+                <span className="text-[9px] font-black text-amber-700 bg-amber-50 border border-amber-200/80 px-2.5 py-0.5 rounded-full flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                  Report Required
+                </span>
+              )}
             </div>
+
+            {!hasSoilReport ? (
+              /* Strict Data Validation: Clean inline notice & placeholder when no soil report attached */
+              <div className="p-5 rounded-2xl bg-amber-50/50 border border-amber-200/70 flex flex-col items-center text-center space-y-3 my-1">
+                <div className="w-12 h-12 rounded-2xl bg-amber-100/80 border border-amber-200 flex items-center justify-center text-amber-700 shadow-xs">
+                  <FlaskConical className="w-6 h-6 text-amber-600" />
+                </div>
+                <div className="space-y-1.5 max-w-sm">
+                  <p className="text-xs font-black text-gray-900 tracking-tight">
+                    {t('digitaltwinscreen.attach_soil_report_to_view_live_data')}
+                  </p>
+                  <p className="text-[10px] text-gray-500 leading-relaxed font-medium">
+                    No verified lab soil test or custom profile is attached to {activePlot.name}. Mock/synthetic numbers have been disabled to ensure strict diagnostic fidelity.
+                  </p>
+                </div>
+                <button
+                  onClick={() => onNavigate && onNavigate("Soil Reports")}
+                  className="px-4 py-2 bg-primary hover:bg-[#235F26] text-white rounded-xl text-xs font-black flex items-center gap-1.5 shadow-xs transition-all cursor-pointer border-0 mt-1"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Attach Soil Report
+                </button>
+              </div>
+            ) : (
+              /* Verified Live Report Data */
+              <div className="space-y-3.5 text-xs">
+                {soilNutrients.map((nut) => (
+                  <div key={nut.label} className="space-y-1.5">
+                    <div className="flex justify-between items-center font-bold text-gray-700">
+                      <span>{nut.label}</span>
+                      {nut.isMissing ? (
+                        <span className="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-md">
+                          {t('digitaltwinscreen.attach_soil_report_to_view_live_data')}
+                        </span>
+                      ) : (
+                        <span className="text-gray-900 font-extrabold">{nut.val}</span>
+                      )}
+                    </div>
+                    {!nut.isMissing ? (
+                      <>
+                        <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                          <div className={`h-full ${nut.color}`} style={{ width: `${nut.pct}%` }} />
+                        </div>
+                        <p className="text-[9px] text-gray-450 leading-none font-medium">{nut.text}</p>
+                      </>
+                    ) : (
+                      <p className="text-[9px] text-amber-600/80 leading-none font-medium">Missing from lab sample record</p>
+                    )}
+                  </div>
+                ))}
+
+                <div className="pt-2 border-t border-gray-100 flex justify-end">
+                  <button
+                    onClick={() => onNavigate && onNavigate("Soil Reports")}
+                    className="text-[10px] font-extrabold text-primary hover:underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0"
+                  >
+                    Manage Soil Report <ChevronRight className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* 9. AI RECOMMENDATION */}

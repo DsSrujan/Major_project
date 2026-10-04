@@ -472,13 +472,19 @@ function dbRowToPlot(row: Record<string, any>): Plot {
     "Critical": "rgba(225, 29, 72, 0.4)", "Needs Attention": "rgba(245, 158, 11, 0.3)",
   };
 
-  return {
-    id: row.id as string,
-    isDemo: false,
-    name: row.name as string,
-    crop: row.crop || "",
-    stage: row.stage || "Seedling",
-    age: typeof row.plantation_age === "number" ? row.plantation_age : 0,
+    const age = typeof row.plantation_age === "number" ? row.plantation_age : 0;
+    let stage = row.stage;
+    if (!stage || (stage === "Seedling" && age >= 2)) {
+      stage = age < 1 ? "Seedling" : age < 2.5 ? "Vegetative" : "Fruit Development";
+    }
+
+    return {
+      id: row.id as string,
+      isDemo: false,
+      name: row.name as string,
+      crop: row.crop || "",
+      stage,
+      age,
     plantingDate: row.planting_date || undefined,
     plantCount: typeof row.plant_count === "number" ? row.plant_count : undefined,
     area: typeof row.area === "number" ? row.area : 0,
