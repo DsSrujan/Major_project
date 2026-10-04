@@ -1019,6 +1019,7 @@
   "digitaltwinscreen.stable_ambient_humidity_index_64": "Stable ambient humidity index (64%)",
   "digitaltwinscreen.ndvi_greenness_ratio_meets_chlorophyll_e": "NDVI greenness ratio meets chlorophyll expectations",
   "digitaltwinscreen.soil_chemical_matrix": "Soil Chemical Matrix",
+  "digitaltwinscreen.attach_soil_report_to_view_live_data": "Attach soil report to view live data",
   "digitaltwinscreen.ai_agronomy_advisory": "AI Agronomy Advisory",
   "digitaltwinscreen.confidence": "% Confidence",
   "digitaltwinscreen.no_ai_analysis_yet_attach_a_soil_report_": "No AI analysis yet — attach a soil report to generate a recommendation.",

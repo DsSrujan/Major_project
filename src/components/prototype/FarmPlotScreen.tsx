@@ -165,7 +165,7 @@ export const FarmPlotScreen: React.FC<FarmPlotScreenProps> = ({
       name: meta.name || "New Farm Plot",
       farmer: meta.farmer || "Swaminathan Gowda",
       crop: meta.crop || "Oil Palm",
-      stage: "Seedling",
+      stage: plantationAge < 1 ? "Seedling" : plantationAge < 2.5 ? "Vegetative" : "Fruit Development",
       age: plantationAge,
       plantingDate: meta.plantingDate || undefined,
       plantCount: meta.plantCount ? parseInt(meta.plantCount, 10) : undefined,
