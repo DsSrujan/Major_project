@@ -318,6 +318,7 @@ export interface DiagnosticExplainRequestPayload {
   unit?: string;
   crop?: string;
   soil_report_id?: string;
+  is_baseline?: boolean;
 }
 
 export interface DiagnosticExplainResponsePayload {
@@ -330,6 +331,7 @@ export interface DiagnosticExplainResponsePayload {
   error?: string;
   error_code?: string;
   context_retrieved?: boolean;
+  is_baseline?: boolean;
 }
 
 export async function explainDiagnosticParameter(

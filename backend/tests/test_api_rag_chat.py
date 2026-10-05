@@ -49,6 +49,50 @@ def test_explain_endpoint_successful():
         assert data["success"] is True
         assert "Agronomic Significance" in data["explanation"]
         assert data["nutrient"] == "nitrogen"
+        assert data["is_baseline"] is True
+
+
+def test_explain_endpoint_baseline_mode():
+    with patch("app.routers.rag_chat.get_settings") as mock_settings, \
+         patch("app.routers.rag_chat.retrieve_context") as mock_rag, \
+         patch("app.routers.rag_chat.fetch_live_weather") as mock_weather, \
+         patch("app.routers.rag_chat.requests.post") as mock_post:
+
+        settings_mock = MagicMock()
+        settings_mock.groq_api_key = "gsk_test_key"
+        mock_settings.return_value = settings_mock
+
+        mock_rag.return_value = ("Standard KAU baseline requirement for Nitrogen in Oil Palm is 250 kg/ha.", True, None)
+        mock_weather.return_value = "Temp 28C, Humid, 0mm rain."
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "choices": [{"message": {"content": "### 🔬 Agronomic Significance\nNitrogen drives vegetative growth.\n\n### 📊 Standard Regional Baseline\nCalibrated to healthy optimal baseline of 250 kg/ha. No deficiency detected."}}]
+        }
+        mock_post.return_value = mock_resp
+
+        payload = {
+            "nutrient": "nitrogen",
+            "nutrient_label": "Available Nitrogen",
+            "current_value": 250,
+            "unit": "kg/ha",
+            "crop": "Oil Palm",
+            "is_baseline": True
+        }
+
+        res = client.post("/api/recommendations/plot-1/explain", json=payload)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["success"] is True
+        assert data["is_baseline"] is True
+        assert "Standard Regional Baseline" in data["explanation"]
+
+        # Verify that Groq was instructed not to diagnose a deficiency
+        called_payload = mock_post.call_args[1]["json"]
+        system_content = called_payload["messages"][0]["content"]
+        assert "Do NOT diagnose a laboratory deficiency" in system_content
+        assert "standard regional agronomic baseline calibration" in system_content
 
 
 def test_explain_endpoint_handles_groq_token_limit():

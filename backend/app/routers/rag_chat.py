@@ -44,6 +44,7 @@ class DiagnosticExplainRequest(BaseModel):
     unit: Optional[str] = Field(None, description="Measurement unit (e.g. 'kg/ha', 'pH', 'mg/kg').")
     crop: Optional[str] = Field(None, description="Crop name (e.g. 'Oil Palm', 'Arecanut', 'Coconut').")
     soil_report_id: Optional[str] = Field(None, description="Optional associated soil report ID.")
+    is_baseline: Optional[bool] = Field(None, description="True if no laboratory soil report is attached (baseline calibration mode).")
 
 
 class DiagnosticExplainResponse(BaseModel):
@@ -56,6 +57,7 @@ class DiagnosticExplainResponse(BaseModel):
     error: Optional[str] = None
     error_code: Optional[str] = None
     context_retrieved: bool = False
+    is_baseline: bool = False
 
 
 class ChatMessage(BaseModel):
@@ -150,14 +152,15 @@ def get_plot_and_soil_context(
     Attempts to read plot details & latest soil report from Supabase.
     Returns (telemetry_dict, (lat, lon) or None).
     """
-    client = get_supabase_client()
     coords = None
     telemetry: dict[str, Any] = {
         "plot_id": plot_id,
         "crop": crop_hint or "Oil Palm",
+        "has_soil_report": False,
     }
 
     try:
+        client = get_supabase_client()
         # 1. Fetch plot
         if not plot_id.startswith("plot-"):
             plot_res = (
@@ -190,6 +193,7 @@ def get_plot_and_soil_context(
             soil_res = query.maybe_single().execute()
             soil_row = getattr(soil_res, "data", None)
             if soil_row:
+                telemetry["has_soil_report"] = True
                 telemetry["nitrogen_kg_ha"] = soil_row.get("nitrogen_kg_ha")
                 telemetry["phosphorus_kg_ha"] = soil_row.get("phosphorus_kg_ha")
                 telemetry["potassium_kg_ha"] = soil_row.get("potassium_kg_ha")
@@ -220,6 +224,7 @@ def explain_diagnostic_parameter(
     RAG-powered diagnostic explainer for a specific nutrient or soil parameter card.
     Fetches KAU Package of Practices agronomic context, combines with live Open-Meteo weather,
     and returns a clean, structured advisory from Groq (Llama 3).
+    When no lab report is attached, provides standard regional baseline calibration guidance.
     """
     crop = request.crop or "Oil Palm"
     nutrient = request.nutrient or "general"
@@ -236,36 +241,78 @@ def explain_diagnostic_parameter(
     lat, lon = coords if coords else (None, None)
     weather_summary = fetch_live_weather(lat, lon)
 
-    # 2. Retrieve Agronomy Knowledge Base context
-    rag_query = f"{crop} {nutrient_label} soil requirement fertilizer dosage application timing"
-    context, context_ok, context_err = retrieve_context(rag_query, match_threshold=0.3, match_count=2)
+    # Determine whether plot is running under baseline calibration (no lab report attached)
+    is_baseline = request.is_baseline
+    if is_baseline is None:
+        is_baseline = not (bool(request.soil_report_id) or telemetry.get("has_soil_report", False))
 
-    # 3. Construct Structured Prompt
-    system_prompt = (
-        "You are NutriPalm-AI, a senior agronomist specializing in South Indian plantation and field crops.\n"
-        "Provide a concise, professional, and farmer-friendly explanation breaking down why this specific "
-        "soil parameter is critical for the crop, what the measured value implies, and weather-smart action steps.\n\n"
-        "Format your response with clean markdown:\n"
-        "### 🔬 Agronomic Significance\n"
-        "(Explain physiological role of this nutrient for this crop)\n\n"
-        "### 📊 Status & Impact on Yield\n"
-        "(Explain what the measured value means and the risk if uncorrected)\n\n"
-        "### 🌿 Recommended Corrective Application\n"
-        "(Specific commercial fertilizer product, split dosage, or conditioning advice)\n\n"
-        "### ⛅ Weather-Smart Application Timing\n"
-        "(Timing guidance based on current rainfall & weather conditions)\n\n"
-        "Keep language practical and clear. Do not contradict deterministic calculations."
-    )
+    # 2. Retrieve Agronomy Knowledge Base context & construct structured prompt
+    if is_baseline:
+        rag_query = f"{crop} {nutrient_label} standard agronomic baseline requirement package of practices maintenance dosage"
+        context, context_ok, context_err = retrieve_context(rag_query, match_threshold=0.3, match_count=2)
 
-    user_prompt = (
-        f"Plot ID: {plot_id}\n"
-        f"Crop: {crop}\n"
-        f"Target Parameter: {nutrient_label} ({nutrient})\n"
-        f"Measured Value: {curr_val}\n"
-        f"Live Weather Telemetry: {weather_summary}\n\n"
-        f"Package of Practices Guidelines:\n{context}\n\n"
-        f"Please provide the agronomic explanation and advice for {nutrient_label}."
-    )
+        system_prompt = (
+            "You are NutriPalm-AI, a senior agronomist specializing in South Indian plantation and field crops.\n"
+            "The farm plot currently has NO laboratory soil report attached, so it is operating under the "
+            "standard regional agronomic baseline calibration (Package of Practices).\n\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "- Clearly explain the standard regional baseline benchmark for this nutrient and why it is essential.\n"
+            "- Do NOT diagnose a laboratory deficiency, and do NOT claim the soil has a measured defect or emergency.\n"
+            "- Clarify that the soil parameters are currently calibrated to the optimal healthy regional baseline.\n"
+            "- Provide standard routine maintenance guidelines, basal application, or organic mulching practices "
+            "per the KAU / ICAR Package of Practices to sustain baseline vigor.\n"
+            "- Provide weather-smart application timing based on current rainfall & weather conditions.\n\n"
+            "Format your response with clean markdown:\n"
+            "### 🔬 Agronomic Significance\n"
+            "(Explain physiological role and importance of this nutrient for this crop)\n\n"
+            "### 📊 Standard Regional Baseline\n"
+            "(Explain the standard healthy benchmark level and optimal target range for this crop under regional baseline calibration. Emphasize that the parameter is calibrated to optimal baseline status with no acute deficiency detected.)\n\n"
+            "### 🌿 Standard Maintenance & Basal Management\n"
+            "(Outline routine seasonal maintenance, pre-monsoon basal recommendations, or organic soil conditioning per KAU / ICAR Package of Practices to sustain healthy baseline levels)\n\n"
+            "### ⛅ Weather-Smart Application Timing\n"
+            "(Timing guidance based on current rainfall & weather conditions)\n\n"
+            "Keep language practical, encouraging, and clear."
+        )
+
+        user_prompt = (
+            f"Plot ID: {plot_id}\n"
+            f"Crop: {crop}\n"
+            f"Target Parameter: {nutrient_label} ({nutrient})\n"
+            f"Agronomic Mode: Standard Regional Baseline Calibration (No laboratory soil report attached)\n"
+            f"Regional Baseline Target: {curr_val}\n"
+            f"Live Weather Telemetry: {weather_summary}\n\n"
+            f"Package of Practices Guidelines:\n{context}\n\n"
+            f"Please provide the agronomic explanation and standard regional baseline guidance for {nutrient_label}."
+        )
+    else:
+        rag_query = f"{crop} {nutrient_label} soil requirement fertilizer dosage application timing"
+        context, context_ok, context_err = retrieve_context(rag_query, match_threshold=0.3, match_count=2)
+
+        system_prompt = (
+            "You are NutriPalm-AI, a senior agronomist specializing in South Indian plantation and field crops.\n"
+            "Provide a concise, professional, and farmer-friendly explanation breaking down why this specific "
+            "soil parameter is critical for the crop, what the measured value implies, and weather-smart action steps.\n\n"
+            "Format your response with clean markdown:\n"
+            "### 🔬 Agronomic Significance\n"
+            "(Explain physiological role of this nutrient for this crop)\n\n"
+            "### 📊 Status & Impact on Yield\n"
+            "(Explain what the measured value means and the risk if uncorrected)\n\n"
+            "### 🌿 Recommended Corrective Application\n"
+            "(Specific commercial fertilizer product, split dosage, or conditioning advice)\n\n"
+            "### ⛅ Weather-Smart Application Timing\n"
+            "(Timing guidance based on current rainfall & weather conditions)\n\n"
+            "Keep language practical and clear. Do not contradict deterministic calculations."
+        )
+
+        user_prompt = (
+            f"Plot ID: {plot_id}\n"
+            f"Crop: {crop}\n"
+            f"Target Parameter: {nutrient_label} ({nutrient})\n"
+            f"Measured Value: {curr_val}\n"
+            f"Live Weather Telemetry: {weather_summary}\n\n"
+            f"Package of Practices Guidelines:\n{context}\n\n"
+            f"Please provide the agronomic explanation and advice for {nutrient_label}."
+        )
 
     settings = get_settings()
     groq_api_key = settings.groq_api_key
@@ -284,6 +331,7 @@ def explain_diagnostic_parameter(
             error="Missing GROQ_API_KEY",
             error_code="GROQ_KEY_MISSING",
             context_retrieved=context_ok,
+            is_baseline=is_baseline,
         )
 
     headers = {
@@ -339,6 +387,7 @@ def explain_diagnostic_parameter(
             explanation=explanation_md,
             weather_summary=weather_summary,
             context_retrieved=context_ok,
+            is_baseline=is_baseline,
         )
 
     if last_resp is not None:
@@ -353,6 +402,7 @@ def explain_diagnostic_parameter(
             error=err_detail,
             error_code=err_code,
             context_retrieved=context_ok,
+            is_baseline=is_baseline,
         )
     return DiagnosticExplainResponse(
         success=False,
@@ -363,6 +413,7 @@ def explain_diagnostic_parameter(
         error="All candidate models failed to return a response.",
         error_code="GROQ_CONNECTION_ERROR",
         context_retrieved=context_ok,
+        is_baseline=is_baseline,
     )
 
 

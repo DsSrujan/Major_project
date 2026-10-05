@@ -27,6 +27,7 @@ interface DiagnosticExplanationDrawerProps {
   cropName: string;
   isLoading: boolean;
   data: DiagnosticExplainResponsePayload | null;
+  isBaseline?: boolean;
   onRetry?: () => void;
 }
 
@@ -37,9 +38,12 @@ export const DiagnosticExplanationDrawer: React.FC<DiagnosticExplanationDrawerPr
   cropName,
   isLoading,
   data,
+  isBaseline,
   onRetry,
 }) => {
   if (!isOpen || !item) return null;
+
+  const isBaselineEffective = isBaseline ?? data?.is_baseline ?? false;
 
   return (
     <AnimatePresence>
@@ -74,18 +78,23 @@ export const DiagnosticExplanationDrawer: React.FC<DiagnosticExplanationDrawerPr
                         {item.name}
                       </h3>
                       <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${
-                        item.status === "critical"
+                        !isBaselineEffective && item.status === "critical"
                           ? "bg-rose-50 text-rose-700 border-rose-200"
-                          : item.status === "deficient"
+                          : !isBaselineEffective && item.status === "deficient"
                           ? "bg-amber-50 text-amber-700 border-amber-200"
                           : "bg-emerald-50 text-emerald-700 border-emerald-200"
                       }`}>
-                        {item.status}
+                        {isBaselineEffective ? "OPTIMAL" : item.status}
                       </span>
                     </div>
                     <p className="text-xs text-gray-500 font-semibold mt-0.5">
                       Target Range: {item.targetRange} • Crop: <strong>{cropName}</strong>
                     </p>
+                    {isBaselineEffective && (
+                      <span className="inline-block mt-1 text-[9px] font-extrabold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
+                        Standard Agronomic Baseline Calibration
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -100,7 +109,9 @@ export const DiagnosticExplanationDrawer: React.FC<DiagnosticExplanationDrawerPr
               {/* Parameter Metrics Pill */}
               <div className="mt-4 grid grid-cols-2 gap-3 bg-white p-3 rounded-2xl border border-gray-200/70 shadow-xs">
                 <div>
-                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">Measured Level</span>
+                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">
+                    {isBaselineEffective ? "Baseline Benchmark" : "Measured Level"}
+                  </span>
                   <span className="text-lg font-black text-gray-950 mt-0.5 block">
                     {item.value !== null ? `${item.value} ${item.unit}` : "N/A"}
                   </span>
@@ -136,10 +147,10 @@ export const DiagnosticExplanationDrawer: React.FC<DiagnosticExplanationDrawerPr
                   </div>
                   <div>
                     <p className="text-xs font-black text-gray-800">
-                      Consulting Agronomy Knowledge Base...
+                      {isBaselineEffective ? "Consulting Package of Practices Baseline Guidelines..." : "Consulting Agronomy Knowledge Base..."}
                     </p>
                     <p className="text-[11px] text-gray-500 font-semibold mt-1">
-                      Synthesizing ICAR & KAU Package of Practices via NutriPalm AI Engine
+                      {isBaselineEffective ? "Synthesizing ICAR & KAU Regional Crop Baseline via NutriPalm AI" : "Synthesizing ICAR & KAU Package of Practices via NutriPalm AI Engine"}
                     </p>
                   </div>
                 </div>
@@ -178,7 +189,11 @@ export const DiagnosticExplanationDrawer: React.FC<DiagnosticExplanationDrawerPr
                 <div className="space-y-4 text-xs text-gray-800 leading-relaxed">
                   <div className="bg-emerald-50/70 border border-emerald-200/80 rounded-2xl p-3.5 flex items-center gap-2.5 text-emerald-900 text-[11px] font-bold shadow-2xs">
                     <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>Validated with localized Package of Practices recommendations</span>
+                    <span>
+                      {isBaselineEffective
+                        ? "Validated with ICAR & KAU Package of Practices regional baseline standards"
+                        : "Validated with localized Package of Practices recommendations"}
+                    </span>
                   </div>
 
                   <div className="space-y-3 font-medium">

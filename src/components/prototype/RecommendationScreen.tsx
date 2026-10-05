@@ -375,7 +375,9 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
 
     const overallSeverity = criticalCount > 0 ? "critical" : warningCount > 0 ? "warning" : "normal";
 
-    const summary = fertilizerPlan.length > 0 
+    const summary = !report
+      ? `Soil profile calibrated to standard regional agronomic baseline for ${plotObj?.name} (${cropType}). Routine seasonal maintenance and organic conditioning recommended.`
+      : fertilizerPlan.length > 0 
       ? `Apply localized correction containing ${fertilizerPlan.map((f) => f.product_display_name.split(" ")[0]).join(", ")} for ${plotObj?.name} (${cropType}).`
       : `Soil composition for ${plotObj?.name} is optimal. Maintain current organic mulching schedule.`;
 
@@ -522,6 +524,8 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
     setIsDiagnosticLoading(true);
     setDiagnosticData(null);
 
+    const hasReport = Boolean(activeSoilReport || lastUploadedReport);
+
     try {
       const res = await explainDiagnosticParameter(activePlotId, {
         nutrient: item.key,
@@ -530,6 +534,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
         unit: item.unit,
         crop: currentPlot?.crop || "Oil Palm",
         soil_report_id: activeSoilReport?.id,
+        is_baseline: !hasReport,
       });
       setDiagnosticData(res);
       if (!res.success && res.pop_message) {
@@ -559,21 +564,23 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
   };
 
   const reportSrc = activeSoilReport || lastUploadedReport;
-  const nVal = extractNum(reportSrc?.nitrogen_kg_ha ?? reportSrc?.nitrogen) ?? 180;
-  const pVal = extractNum(reportSrc?.phosphorus_kg_ha ?? reportSrc?.phosphorus) ?? 18;
-  const kVal = extractNum(reportSrc?.potassium_kg_ha ?? reportSrc?.potassium) ?? 145;
-  const ocVal = extractNum(reportSrc?.organic_carbon_percent ?? reportSrc?.organic_carbon) ?? 0.55;
-  const phVal = extractNum(reportSrc?.ph) ?? 5.8;
-  const ecVal = extractNum(reportSrc?.electrical_conductivity) ?? 0.42;
-  const znVal = extractNum(reportSrc?.zinc) ?? 0.48;
-  const sVal = extractNum(reportSrc?.sulphur) ?? 12.0;
-  const bVal = extractNum(reportSrc?.boron) ?? 0.65;
-  const feVal = extractNum(reportSrc?.iron) ?? 4.2;
-  const mnVal = extractNum(reportSrc?.manganese) ?? 2.8;
-  const cuVal = extractNum(reportSrc?.copper) ?? 0.85;
-
+  const hasSoilReport = Boolean(reportSrc);
   const currentCrop = currentPlot?.crop || "Oil Palm";
   const cropBaseline = getCropBaseline(currentCrop);
+
+  // Baseline data alignment: when no laboratory soil report is attached, fallback values match standard healthy baseline thresholds
+  const nVal = extractNum(reportSrc?.nitrogen_kg_ha ?? reportSrc?.nitrogen) ?? cropBaseline.nitrogen.target;
+  const pVal = extractNum(reportSrc?.phosphorus_kg_ha ?? reportSrc?.phosphorus) ?? cropBaseline.phosphorus.target;
+  const kVal = extractNum(reportSrc?.potassium_kg_ha ?? reportSrc?.potassium) ?? cropBaseline.potassium.target;
+  const ocVal = extractNum(reportSrc?.organic_carbon_percent ?? reportSrc?.organic_carbon) ?? cropBaseline.organic_carbon.target;
+  const phVal = extractNum(reportSrc?.ph) ?? cropBaseline.ph.target;
+  const ecVal = extractNum(reportSrc?.electrical_conductivity) ?? 0.60;
+  const znVal = extractNum(reportSrc?.zinc) ?? 0.85;
+  const sVal = extractNum(reportSrc?.sulphur) ?? 14.0;
+  const bVal = extractNum(reportSrc?.boron) ?? 0.75;
+  const feVal = extractNum(reportSrc?.iron) ?? 6.5;
+  const mnVal = extractNum(reportSrc?.manganese) ?? 3.5;
+  const cuVal = extractNum(reportSrc?.copper) ?? 0.90;
 
   const diagnosticCards: DiagnosticItem[] = [
     {
@@ -583,7 +590,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: nVal,
       unit: "kg/ha",
       targetRange: `${cropBaseline.nitrogen.min} - ${cropBaseline.nitrogen.max} kg/ha`,
-      status: nVal < cropBaseline.nitrogen.min ? "critical" : nVal > cropBaseline.nitrogen.max ? "excess" : "optimal",
+      status: !hasSoilReport ? "optimal" : nVal < cropBaseline.nitrogen.min ? "critical" : nVal > cropBaseline.nitrogen.max ? "excess" : "optimal",
       category: "macro",
     },
     {
@@ -593,7 +600,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: pVal,
       unit: "kg/ha",
       targetRange: `${cropBaseline.phosphorus.min} - ${cropBaseline.phosphorus.max} kg/ha`,
-      status: pVal < cropBaseline.phosphorus.min ? "deficient" : pVal > cropBaseline.phosphorus.max ? "excess" : "optimal",
+      status: !hasSoilReport ? "optimal" : pVal < cropBaseline.phosphorus.min ? "deficient" : pVal > cropBaseline.phosphorus.max ? "excess" : "optimal",
       category: "macro",
     },
     {
@@ -603,7 +610,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: kVal,
       unit: "kg/ha",
       targetRange: `${cropBaseline.potassium.min} - ${cropBaseline.potassium.max} kg/ha`,
-      status: kVal < cropBaseline.potassium.min ? "critical" : kVal > cropBaseline.potassium.max ? "excess" : "optimal",
+      status: !hasSoilReport ? "optimal" : kVal < cropBaseline.potassium.min ? "critical" : kVal > cropBaseline.potassium.max ? "excess" : "optimal",
       category: "macro",
     },
     {
@@ -613,7 +620,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: ocVal,
       unit: "%",
       targetRange: `>${cropBaseline.organic_carbon.min} %`,
-      status: ocVal < cropBaseline.organic_carbon.min ? "deficient" : "optimal",
+      status: !hasSoilReport ? "optimal" : ocVal < cropBaseline.organic_carbon.min ? "deficient" : "optimal",
       category: "macro",
     },
     {
@@ -623,7 +630,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: phVal,
       unit: "pH",
       targetRange: `${cropBaseline.ph.min} - ${cropBaseline.ph.max}`,
-      status: phVal < cropBaseline.ph.min || phVal > cropBaseline.ph.max ? "critical" : "optimal",
+      status: !hasSoilReport ? "optimal" : (phVal < cropBaseline.ph.min || phVal > cropBaseline.ph.max) ? "critical" : "optimal",
       category: "physical",
     },
     {
@@ -633,7 +640,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: ecVal,
       unit: "dS/m",
       targetRange: "0.50 - 0.75 dS/m",
-      status: ecVal < 0.50 ? "deficient" : ecVal > 0.75 ? "excess" : "optimal",
+      status: !hasSoilReport ? "optimal" : ecVal < 0.50 ? "deficient" : ecVal > 0.75 ? "excess" : "optimal",
       category: "physical",
     },
     {
@@ -643,7 +650,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: znVal,
       unit: "mg/kg",
       targetRange: "> 0.60 mg/kg",
-      status: znVal < 0.60 ? "deficient" : "optimal",
+      status: !hasSoilReport ? "optimal" : znVal < 0.60 ? "deficient" : "optimal",
       category: "micro",
     },
     {
@@ -653,7 +660,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: sVal,
       unit: "mg/kg",
       targetRange: "> 10.0 mg/kg",
-      status: sVal < 10.0 ? "deficient" : "optimal",
+      status: !hasSoilReport ? "optimal" : sVal < 10.0 ? "deficient" : "optimal",
       category: "macro",
     },
     {
@@ -663,7 +670,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: bVal,
       unit: "mg/kg",
       targetRange: "0.50 - 1.00 mg/kg",
-      status: bVal < 0.50 ? "deficient" : "optimal",
+      status: !hasSoilReport ? "optimal" : bVal < 0.50 ? "deficient" : "optimal",
       category: "micro",
     },
     {
@@ -673,7 +680,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: feVal,
       unit: "mg/kg",
       targetRange: "> 4.50 mg/kg",
-      status: feVal < 4.50 ? "deficient" : "optimal",
+      status: !hasSoilReport ? "optimal" : feVal < 4.50 ? "deficient" : "optimal",
       category: "micro",
     },
     {
@@ -683,7 +690,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: mnVal,
       unit: "ppm",
       targetRange: "> 2.00 ppm",
-      status: mnVal < 2.00 ? "deficient" : "optimal",
+      status: !hasSoilReport ? "optimal" : mnVal < 2.00 ? "deficient" : "optimal",
       category: "micro",
     },
     {
@@ -693,7 +700,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       value: cuVal,
       unit: "mg/kg",
       targetRange: "> 0.20 mg/kg",
-      status: cuVal < 0.20 ? "deficient" : "optimal",
+      status: !hasSoilReport ? "optimal" : cuVal < 0.20 ? "deficient" : "optimal",
       category: "micro",
     },
   ];
@@ -1158,8 +1165,14 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
                 </div>
                 <div className="text-right">
                   <span className="text-[9px] font-mono text-gray-400 block uppercase">{t('recommendationscreen.priority_level')}</span>
-                  <span className="text-rose-600 font-black text-sm bg-rose-50 border border-rose-100 px-3 py-1 rounded-xl">
-                    {recommendationData ? (recommendationData.overall_severity === "critical" ? "CRITICAL" : recommendationData.overall_severity === "warning" ? "HIGH" : "NORMAL") : t('recommendationscreen.high')}
+                  <span className={`font-black text-sm px-3 py-1 rounded-xl border ${
+                    recommendationData?.overall_severity === "critical"
+                      ? "text-rose-600 bg-rose-50 border-rose-200"
+                      : recommendationData?.overall_severity === "warning"
+                      ? "text-amber-700 bg-amber-50 border-amber-200"
+                      : "text-emerald-700 bg-emerald-50 border-emerald-200"
+                  }`}>
+                    {recommendationData ? (recommendationData.overall_severity === "critical" ? "CRITICAL" : recommendationData.overall_severity === "warning" ? "HIGH" : "NORMAL") : "NORMAL"}
                   </span>
                 </div>
               </div>
@@ -1204,11 +1217,13 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
                   Interactive Soil Diagnostics (12 Parameters)
                 </h4>
                 <p className="text-[11px] text-gray-500 font-semibold mt-0.5">
-                  Click any card to open the AI RAG Explainer drawer with live Open-Meteo weather guidance
+                  {!hasSoilReport
+                    ? "Operating under standard regional agronomic baseline. Click any card for AI RAG Package of Practices baseline explainer."
+                    : "Click any card to open the AI RAG Explainer drawer with live Open-Meteo weather guidance"}
                 </p>
               </div>
               <span className="text-[10px] font-extrabold text-emerald-750 bg-emerald-50 border border-emerald-150 px-2.5 py-1 rounded-full w-fit">
-                KAU Package of Practices
+                {!hasSoilReport ? "Regional Baseline Benchmark" : "KAU Package of Practices"}
               </span>
             </div>
 
@@ -1256,7 +1271,9 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
 
                     <div className="pt-1.5 border-t border-gray-200/50 flex items-center justify-between text-[8px] font-bold text-gray-400">
                       <span>Ideal: {card.targetRange.split(" ")[0]}</span>
-                      <span className="text-emerald-700 font-extrabold hover:underline">Explain →</span>
+                      <span className="text-emerald-700 font-extrabold hover:underline">
+                        {!hasSoilReport ? "Baseline Guide →" : "Explain →"}
+                      </span>
                     </div>
                   </motion.div>
                 );
@@ -1746,6 +1763,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
         cropName={currentPlot?.crop || "Oil Palm"}
         isLoading={isDiagnosticLoading}
         data={diagnosticData}
+        isBaseline={!hasSoilReport}
         onRetry={() => selectedDiagnosticItem && handleCardClick(selectedDiagnosticItem)}
       />
 
