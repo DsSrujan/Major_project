@@ -82,19 +82,31 @@ body {
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid rgba(46, 125, 50, 0.06);
+  transform: translateZ(0);
 }
 
 .glass-card {
-  background: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid rgba(46, 125, 50, 0.08);
   box-shadow: 0 4px 30px rgba(0, 0, 0, 0.02);
+  transform: translateZ(0);
 }
 
 .glass-card-hover:hover {
   border-color: rgba(46, 125, 50, 0.2);
   box-shadow: 0 10px 40px rgba(46, 125, 50, 0.06);
+}
+
+/* Off-screen section performance booster */
+section {
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 700px;
+}
+
+#home {
+  content-visibility: visible;
 }
 
 /* Glow effects */

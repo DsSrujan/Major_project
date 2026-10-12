@@ -8,4 +8,14 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  server: {
+    watch: {
+      ignored: [
+        '**/.wwebjs_auth/**',
+        '**/.wwebjs_cache/**',
+        '**/backend/**',
+        '**/supabase/**',
+      ],
+    },
+  },
 })

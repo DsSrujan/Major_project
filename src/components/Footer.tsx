@@ -30,7 +30,6 @@ export const Footer: React.FC<FooterProps> = ({ onExplore }) => {
     // Find contact or about or other sections
     let href = id;
     if (id === "#technology") href = "#features";
-    if (id === "#leadership") href = "#about";
     
     const element = document.querySelector(href);
     if (element) {
@@ -135,7 +134,6 @@ export const Footer: React.FC<FooterProps> = ({ onExplore }) => {
               <a href="#features" onClick={(e) => handleScrollTo(e, "#features")} className="text-xs text-gray-450 hover:text-primary transition-colors cursor-pointer">{t('footer.features')}</a>
               <a href="#workflow" onClick={(e) => handleScrollTo(e, "#workflow")} className="text-xs text-gray-450 hover:text-primary transition-colors cursor-pointer">{t('footer.workflow')}</a>
               <a href="#technology" onClick={(e) => handleScrollTo(e, "#technology")} className="text-xs text-gray-450 hover:text-primary transition-colors cursor-pointer">{t('footer.technology')}</a>
-              <a href="#leadership" onClick={(e) => handleScrollTo(e, "#leadership")} className="text-xs text-gray-450 hover:text-primary transition-colors cursor-pointer">{t('footer.leadership')}</a>
               <a href="#contact" onClick={(e) => handleScrollTo(e, "#contact")} className="text-xs text-gray-450 hover:text-primary transition-colors cursor-pointer">{t('footer.contact')}</a>
             </nav>
           </div>

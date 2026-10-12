@@ -3,9 +3,13 @@ import { supabase } from "../lib/supabaseClient";
 
 export interface ProfileData {
   id: string;
+  name?: string;
   full_name: string;
   email: string;
+  phone?: string;
   phone_number?: string;
+  dob?: string;
+  address?: string;
   district?: string;
   state?: string;
   village?: string;
@@ -279,7 +283,7 @@ export function useFarmerAnalytics() {
         // 1. Fetch Farmer Profile
         const { data: profileData, error: profileErr } = await supabase
           .from("profiles")
-          .select("id, full_name, email, phone_number, district, state, village, preferred_language")
+          .select("id, name, full_name, email, phone, phone_number, dob, address, district, state, village, preferred_language")
           .eq("id", currentUser.id)
           .maybeSingle();
 
@@ -360,7 +364,13 @@ export function useFarmerAnalytics() {
         }
 
         if (active) {
-          if (profileData) setProfile(profileData);
+          if (profileData) {
+            setProfile({
+              ...profileData,
+              full_name: profileData.name || profileData.full_name || "Farmer",
+              phone_number: profileData.phone || profileData.phone_number || ""
+            });
+          }
           // If the user has no plots in DB, let setPlots receive [] to show onboarding
           setPlots(finalPlots);
         }
