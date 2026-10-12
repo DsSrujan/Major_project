@@ -120,49 +120,6 @@ export const DashboardSkeleton: React.FC = () => {
   );
 };
 
-export const FarmerTableSkeleton: React.FC = () => {
-  return (
-    <div className="space-y-6 animate-pulse text-left">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-gray-200/50 pb-5">
-        <div className="space-y-2.5 w-full max-w-sm">
-          <div className="h-7 w-2/3 bg-gray-200 rounded-lg shimmer" />
-          <div className="h-4 w-1/2 bg-gray-200 rounded-md shimmer" />
-        </div>
-        <div className="h-9 w-32 bg-gray-200 rounded-xl shimmer" />
-      </div>
-
-      {/* Filters block */}
-      <div className="bg-white rounded-2xl p-4 border border-gray-150 shadow-xs flex flex-col sm:flex-row gap-4 items-center justify-between">
-        <div className="h-9 w-full sm:w-64 bg-gray-100 rounded-xl shimmer" />
-        <div className="flex gap-3 w-full sm:w-auto">
-          <div className="h-9 w-28 bg-gray-100 rounded-xl shimmer" />
-          <div className="h-9 w-28 bg-gray-100 rounded-xl shimmer" />
-        </div>
-      </div>
-
-      {/* Table Card Skeleton */}
-      <div className="bg-white rounded-3xl border border-gray-150 overflow-hidden shadow-xs">
-        <div className="p-4 bg-gray-55/75 border-b border-gray-150 grid grid-cols-5 gap-4">
-          {[...Array(5)].map((_, i) => (
-            <div key={i} className="h-3 bg-gray-200 rounded-md shimmer" />
-          ))}
-        </div>
-        <div className="divide-y divide-gray-100 p-4 space-y-4">
-          {[...Array(5)].map((_, idx) => (
-            <div key={idx} className="grid grid-cols-5 gap-4 py-2">
-              <div className="h-3.5 bg-gray-200 rounded-md shimmer w-3/4" />
-              <div className="h-3.5 bg-gray-150 rounded-md shimmer w-1/2" />
-              <div className="h-3.5 bg-gray-150 rounded-md shimmer w-2/3" />
-              <div className="h-3.5 bg-gray-200 rounded-md shimmer w-1/3" />
-              <div className="h-3.5 bg-gray-150 rounded-md shimmer w-1/4 justify-self-end" />
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
 
 export const SoilReportSkeleton: React.FC = () => {
   return (

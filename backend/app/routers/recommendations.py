@@ -17,9 +17,12 @@ owner_id is never taken from client input.
 from __future__ import annotations
 
 import logging
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 
+from app.database import get_supabase_client
 from app.dependencies import AuthenticatedUser, get_current_user
 from app.exceptions import (
     NotAuthorized,
@@ -49,7 +52,7 @@ from app.schemas.api import (
     row_to_record,
     to_response,
 )
-from app.services import recommendation_service
+from app.services import recommendation_service, whatsapp_service
 
 logger = logging.getLogger("nutripalm.recommendations")
 
@@ -258,3 +261,113 @@ def get_recommendation(
         ) from exc
 
     return row_to_record(row)
+
+
+class WhatsAppDispatchByRecIdRequest(BaseModel):
+    phone_override: Optional[str] = None
+    custom_message: Optional[str] = None
+
+
+@router.post(
+    "/{recommendation_id}/whatsapp",
+    tags=["recommendations", "whatsapp"],
+)
+def dispatch_recommendation_whatsapp(
+    recommendation_id: str,
+    body: Optional[WhatsAppDispatchByRecIdRequest] = None,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    rec_repo: RecommendationRepository = Depends(
+        get_recommendation_repository
+    ),
+    plot_repo: PlotRepository = Depends(get_plot_repository),
+) -> dict[str, Any]:
+    """
+    Retrieves the specified recommendation, looks up the user's phone number
+    from their profile, formats key crop status values and urgent advice,
+    and dispatches it via the WhatsApp service.
+    """
+    # 1. Fetch recommendation
+    try:
+        row = rec_repo.get_for_owner(
+            recommendation_id,
+            current_user.user_id,
+        )
+    except (RecommendationNotFound, NotAuthorized) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recommendation not found.",
+        ) from exc
+    except RepositoryNotConfigured as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Recommendation database is not configured.",
+        ) from exc
+
+    # 2. Fetch plot details if available
+    plot_name = "Plot"
+    crop = row.get("crop", "Oil Palm")
+    plot_id = row.get("plot_id")
+    if plot_id:
+        try:
+            plot = plot_repo.get_plot(plot_id)
+            if plot:
+                plot_name = plot.name
+                crop = plot.crop
+        except Exception:
+            pass
+
+    # 3. Retrieve user profile from Supabase
+    phone = body.phone_override if body and body.phone_override else None
+    farmer_name = "Farmer"
+    try:
+        client = get_supabase_client()
+        res = client.table("profiles").select("*").eq("id", current_user.user_id).limit(1).execute()
+        if res.data and len(res.data) > 0:
+            profile = res.data[0]
+            if not phone:
+                phone = profile.get("phone") or profile.get("phone_number")
+            farmer_name = profile.get("name") or profile.get("full_name") or "Farmer"
+    except Exception as exc:
+        logger.warning("Could not query user profile: %s", exc)
+
+    if not phone:
+        return {
+            "success": False,
+            "status": "missing_phone",
+            "error": "No phone number found in user profile. Please update your profile in Settings or during login.",
+        }
+
+    # 4. Extract diagnostic and advice fields from recommendation row
+    findings = row.get("deficiencies") or []
+    fertilizer_plan = row.get("fertilizer_plan") or []
+    yield_pred = row.get("yield_prediction") or {}
+    expected_yield = yield_pred.get("expected_yield_t_ha") or yield_pred.get("expected_yield")
+
+    severity = "normal"
+    if any(f.get("status") in ("critical", "deficient") for f in findings if isinstance(f, dict)):
+        severity = "critical"
+    elif any(f.get("status") == "warning" for f in findings if isinstance(f, dict)):
+        severity = "warning"
+
+    advice = None
+    explanation = row.get("explanation")
+    if isinstance(explanation, dict):
+        advice = explanation.get("summary")
+    elif isinstance(explanation, str):
+        advice = explanation
+
+    custom_msg = body.custom_message if body else None
+
+    # 5. Dispatch via WhatsApp service
+    result = whatsapp_service.send_whatsapp_recommendation(
+        phone=phone,
+        farmer_name=farmer_name,
+        plot_name=plot_name,
+        crop=crop,
+        severity=severity,
+        fertilizer_plan=fertilizer_plan,
+        advice=advice,
+        expected_yield=expected_yield,
+        custom_message=custom_msg,
+    )
+    return result

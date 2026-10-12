@@ -393,5 +393,143 @@ export async function sendChatMessage(payload: ChatRequestPayload): Promise<Chat
   return response.json();
 }
 
+/**
+ * WhatsApp Notification Service Interfaces and APIs.
+ */
+export interface WhatsAppStatusPayload {
+  service?: string;
+  status: "initializing" | "qr_ready" | "authenticated" | "ready" | "auth_failure" | "disconnected" | "error" | "service_offline";
+  isReady: boolean;
+  hasQrCode?: boolean;
+  qrCode?: string | null;
+  lastError?: string | null;
+  error?: string;
+}
 
+export interface WhatsAppSendRecommendationPayload {
+  phone?: string;
+  farmer_name?: string;
+  plot_name?: string;
+  crop?: string;
+  severity?: string;
+  soil_data?: Record<string, any>;
+  fertilizer_plan?: Array<any>;
+  advice?: string;
+  expected_yield?: number;
+  custom_message?: string;
+}
 
+export interface WhatsAppDispatchResponse {
+  success: boolean;
+  status: string;
+  recipient?: string;
+  messageId?: string;
+  preview?: string;
+  error?: string;
+}
+
+export async function getWhatsAppStatus(): Promise<WhatsAppStatusPayload> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/whatsapp/status`);
+    if (!response.ok) {
+      return {
+        status: "error",
+        isReady: false,
+        error: `Server responded with ${response.status}`,
+      };
+    }
+    return await response.json();
+  } catch (err: any) {
+    return {
+      status: "service_offline",
+      isReady: false,
+      error: err.message || "Failed to reach WhatsApp service.",
+    };
+  }
+}
+
+export async function sendRecommendationToWhatsApp(
+  payload: WhatsAppSendRecommendationPayload
+): Promise<WhatsAppDispatchResponse> {
+  const headers = await getHeaders();
+  const response = await fetch(`${API_BASE_URL}/api/whatsapp/send-recommendation`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json().catch(() => ({
+    success: false,
+    status: "error",
+    error: `HTTP ${response.status}`,
+  }));
+
+  return data;
+}
+
+export async function dispatchRecommendationByIdToWhatsApp(
+  recommendationId: string,
+  options?: { phone_override?: string; custom_message?: string }
+): Promise<WhatsAppDispatchResponse> {
+  const headers = await getHeaders();
+  const response = await fetch(`${API_BASE_URL}/api/recommendations/${encodeURIComponent(recommendationId)}/whatsapp`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(options || {}),
+  });
+
+  const data = await response.json().catch(() => ({
+    success: false,
+    status: "error",
+    error: `HTTP ${response.status}`,
+  }));
+
+  return data;
+}
+
+export interface DashboardStatsPayload {
+  success: boolean;
+  totalFarmers: number;
+  totalPlots: number;
+  mappedPlots: number;
+  activeTwins: number;
+  recommendations: number;
+  soilHealthScore: number;
+  totalAcreage: number;
+  sensorCount: number;
+  lastSynced: string;
+}
+
+/**
+ * Fetch overall platform stats aggregated from Supabase.
+ */
+export async function getDashboardStats(): Promise<DashboardStatsPayload> {
+  const headers = await getHeaders();
+  const response = await fetch(`${API_BASE_URL}/api/dashboard/stats`, {
+    method: "GET",
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch dashboard stats: HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Force flush backend cache and re-aggregate latest Supabase stats.
+ */
+export async function refreshDashboardStats(): Promise<DashboardStatsPayload> {
+  const headers = await getHeaders();
+  const response = await fetch(`${API_BASE_URL}/api/dashboard/stats/refresh`, {
+    method: "POST",
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to refresh dashboard stats: HTTP ${response.status}`);
+  }
+
+  return response.json();
+}

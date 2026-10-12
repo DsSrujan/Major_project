@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import advisory, digital_twins, geospatial, rag_chat, recommendations, soil_reports
+from app.routers import advisory, dashboard, digital_twins, geospatial, rag_chat, recommendations, soil_reports, whatsapp
 
 logging.basicConfig(level=logging.INFO)
 
@@ -38,12 +38,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(dashboard.router)
 app.include_router(recommendations.router)
 app.include_router(soil_reports.router)
 app.include_router(geospatial.router)
 app.include_router(digital_twins.router)
 app.include_router(advisory.router)
 app.include_router(rag_chat.router)
+app.include_router(whatsapp.router)
 
 
 

@@ -32,75 +32,26 @@ export const Hero: React.FC<HeroProps> = ({ onExplore }) => {
       <div className="absolute top-20 right-0 w-[600px] h-[600px] bg-gradient-to-br from-[#A5D6A7]/20 via-[#66BB6A]/5 to-transparent rounded-full filter blur-3xl pointer-events-none animate-pulse-slow" />
       <div className="absolute bottom-10 left-10 w-[500px] h-[500px] bg-gradient-to-tr from-[#2E7D32]/5 to-transparent rounded-full filter blur-3xl pointer-events-none animate-pulse-slow" />
 
-      {/* Topographic Lines Agriculture Backdrop (SVG) */}
+      {/* Topographic Lines Agriculture Backdrop (SVG) - Static hardware-accelerated */}
       <div className="absolute inset-0 pointer-events-none opacity-20">
         <svg
           className="w-full h-full text-primary/10 stroke-current fill-none"
           viewBox="0 0 1440 800"
           xmlns="http://www.w3.org/2000/svg"
         >
-          {/* Alternating Contour Lines representing land levels */}
-          <motion.path
+          <path
             d="M -100 250 C 200 150, 400 350, 800 200 C 1200 50, 1300 450, 1600 300"
             strokeWidth="1.5"
-            animate={{
-              d: [
-                "M -100 250 C 200 150, 400 350, 800 200 C 1200 50, 1300 450, 1600 300",
-                "M -100 260 C 210 160, 390 340, 810 210 C 1190 60, 1310 440, 1600 310",
-                "M -100 250 C 200 150, 400 350, 800 200 C 1200 50, 1300 450, 1600 300"
-              ]
-            }}
-            transition={{ duration: 12, repeat: Infinity, ease: "easeInOut" }}
           />
-          <motion.path
+          <path
             d="M -100 320 C 200 220, 400 420, 800 270 C 1200 120, 1300 520, 1600 370"
             strokeWidth="1"
-            animate={{
-              d: [
-                "M -100 320 C 200 220, 400 420, 800 270 C 1200 120, 1300 520, 1600 370",
-                "M -100 328 C 205 228, 395 412, 805 278 C 1195 128, 1305 512, 1600 378",
-                "M -100 320 C 200 220, 400 420, 800 270 C 1200 120, 1300 520, 1600 370"
-              ]
-            }}
-            transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
           />
-          <motion.path
+          <path
             d="M -100 390 C 200 290, 400 490, 800 340 C 1200 190, 1300 590, 1600 440"
             strokeWidth="0.8"
-            animate={{
-              d: [
-                "M -100 390 C 200 290, 400 490, 800 340 C 1200 190, 1300 590, 1600 440",
-                "M -100 395 C 202 295, 398 485, 802 345 C 1198 195, 1302 585, 1600 445",
-                "M -100 390 C 200 290, 400 490, 800 340 C 1200 190, 1300 590, 1600 440"
-              ]
-            }}
-            transition={{ duration: 16, repeat: Infinity, ease: "easeInOut" }}
           />
         </svg>
-      </div>
-
-      {/* Floating Particles */}
-      <div className="absolute inset-0 pointer-events-none">
-        {[...Array(8)].map((_, i) => (
-          <motion.div
-            key={i}
-            className="absolute w-1.5 h-1.5 rounded-full bg-primary/10"
-            style={{
-              top: `${Math.random() * 70 + 15}%`,
-              left: `${Math.random() * 80 + 10}%`,
-            }}
-            animate={{
-              y: [0, -40, 0],
-              opacity: [0.08, 0.4, 0.08],
-              scale: [0.9, 1.1, 0.9]
-            }}
-            transition={{
-              duration: 8 + Math.random() * 5,
-              repeat: Infinity,
-              ease: "easeInOut",
-            }}
-          />
-        ))}
       </div>
 
       <div className="max-w-7xl mx-auto px-6 grid grid-cols-1 lg:grid-cols-12 gap-16 items-center relative z-10 w-full">
@@ -244,15 +195,8 @@ export const Hero: React.FC<HeroProps> = ({ onExplore }) => {
             <div className="absolute -inset-4 bg-gradient-to-tr from-[#2E7D32]/10 to-[#66BB6A]/10 rounded-[32px] filter blur-xl opacity-70" />
 
             {/* Main Floating Mockup Container */}
-            <motion.div
-              className="relative rounded-2xl border border-gray-200/80 bg-white p-5 shadow-2xl shadow-gray-900/10 overflow-hidden"
-              animate={{ y: [-6, 6] }}
-              transition={{
-                duration: 5,
-                repeat: Infinity,
-                repeatType: "reverse",
-                ease: "easeInOut",
-              }}
+            <div
+              className="relative rounded-2xl border border-gray-200/80 bg-white p-5 shadow-2xl shadow-gray-900/10 overflow-hidden animate-float will-change-transform"
             >
               {/* Header Ribbon */}
               <div className="flex items-center justify-between pb-4 border-b border-gray-100 mb-4">
@@ -280,27 +224,23 @@ export const Hero: React.FC<HeroProps> = ({ onExplore }) => {
                   <line x1="180" y1="20" x2="20" y2="100" stroke="currentColor" strokeWidth="0.5" strokeDasharray="3 3" opacity="0.3" />
                   
                   {/* Plot shapes */}
-                  <motion.polygon
+                  <polygon
                     points="30,80 80,40 160,50 120,100"
                     fill="rgba(46, 125, 50, 0.08)"
                     stroke="rgba(46, 125, 50, 0.7)"
                     strokeWidth="1.5"
-                    initial={{ pathLength: 0 }}
-                    animate={{ pathLength: 1 }}
-                    transition={{ duration: 1.5, delay: 0.5 }}
                   />
 
                   {/* Hotspots / Indicators */}
                   <circle cx="80" cy="40" r="3" fill="#2E7D32" />
                   <circle cx="120" cy="100" r="3" fill="#2E7D32" />
                   
-                  <motion.circle
+                  <circle
                     cx="100"
                     cy="65"
                     r="4"
                     fill="#E53E3E"
-                    animate={{ scale: [1, 1.6, 1] }}
-                    transition={{ repeat: Infinity, duration: 2 }}
+                    className="animate-pulse"
                   />
                   <text x="110" y="68" fill="#E53E3E" fontSize="8" fontWeight="bold">{t('hero.soil_ph_anomaly')}</text>
                 </svg>
@@ -329,18 +269,11 @@ export const Hero: React.FC<HeroProps> = ({ onExplore }) => {
                   </div>
                 </div>
               </div>
-            </motion.div>
+            </div>
 
             {/* Overlapping Floating Sub-Card 1 */}
-            <motion.div
-              className="absolute -top-6 -left-8 w-44 rounded-xl border border-gray-100 bg-white/90 backdrop-blur p-3.5 shadow-xl hidden sm:flex items-center gap-3"
-              animate={{ y: [4, -4] }}
-              transition={{
-                duration: 4,
-                repeat: Infinity,
-                repeatType: "reverse",
-                ease: "easeInOut",
-              }}
+            <div
+              className="absolute -top-6 -left-8 w-44 rounded-xl border border-gray-100 bg-white/90 backdrop-blur p-3.5 shadow-xl hidden sm:flex items-center gap-3 animate-float-delayed will-change-transform"
             >
               <div className="p-2 rounded-lg bg-[#2E7D32]/10 text-[#2E7D32]">
                 <Shield className="w-5 h-5" />
@@ -349,18 +282,11 @@ export const Hero: React.FC<HeroProps> = ({ onExplore }) => {
                 <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">{t('hero.npk_analyzer')}</span>
                 <span className="text-xs font-extrabold text-gray-800">{t('hero.100_accurate')}</span>
               </div>
-            </motion.div>
+            </div>
 
             {/* Overlapping Floating Sub-Card 2 */}
-            <motion.div
-              className="absolute -bottom-4 -right-6 w-48 rounded-xl border border-gray-100 bg-white/90 backdrop-blur p-3.5 shadow-xl hidden sm:flex items-center gap-3"
-              animate={{ y: [-4, 4] }}
-              transition={{
-                duration: 4.5,
-                repeat: Infinity,
-                repeatType: "reverse",
-                ease: "easeInOut",
-              }}
+            <div
+              className="absolute -bottom-4 -right-6 w-48 rounded-xl border border-gray-100 bg-white/90 backdrop-blur p-3.5 shadow-xl hidden sm:flex items-center gap-3 animate-float will-change-transform"
             >
               <div className="flex flex-col text-left w-full">
                 <div className="flex items-center justify-between mb-1.5">
@@ -372,7 +298,7 @@ export const Hero: React.FC<HeroProps> = ({ onExplore }) => {
                   <div className="w-11/12 h-full bg-primary" />
                 </div>
               </div>
-            </motion.div>
+            </div>
           </motion.div>
         </div>
       </div>

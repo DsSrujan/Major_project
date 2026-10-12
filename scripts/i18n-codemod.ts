@@ -1,4 +1,4 @@
-import { Project, SyntaxKind, JsxText, StringLiteral, Node } from 'ts-morph';
+import { Project, type JsxText, type StringLiteral, Node } from 'ts-morph';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -87,7 +87,6 @@ for (const sourceFile of sourceFiles) {
     const baseName = path.basename(filePath, '.tsx').toLowerCase();
     
     let fileModified = false;
-    let importAdded = false;
     const componentsToInject = new Set<Node>();
 
     const nodesToReplace: {
@@ -233,7 +232,6 @@ for (const sourceFile of sourceFiles) {
                 namedImports: ['useTranslation'],
                 moduleSpecifier: `${relPath}/useTranslation`
             });
-            importAdded = true;
         }
         sourceFile.saveSync();
     }

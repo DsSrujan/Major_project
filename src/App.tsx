@@ -77,7 +77,7 @@ function App() {
             animate={
               transitionState === "fading-out"
                 ? { opacity: 0, scale: 0.98, filter: "blur(12px)" }
-                : { opacity: 1, scale: 1, filter: "blur(0px)" }
+                : { opacity: 1, scale: 1, filter: "none" }
             }
             exit={{ opacity: 0 }}
             transition={{ duration: 0.8, ease: "easeInOut" }}

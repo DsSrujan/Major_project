@@ -78,6 +78,7 @@ interface DashboardScreenProps {
   userProfile: any;
   onNavigate: (screen: string) => void;
   onStartDemo?: () => void;
+  onRefreshStats?: () => Promise<void> | void;
 }
 
 export const DashboardScreen: React.FC<DashboardScreenProps> = ({
@@ -86,10 +87,24 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   currentUser,
   userProfile,
   onNavigate,
-  onStartDemo
+  onStartDemo,
+  onRefreshStats
 }) => {
-    const { t } = useTranslation();
+  const { t } = useTranslation();
   const [isAssistantExpanded, setIsAssistantExpanded] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  const handleManualSync = async () => {
+    if (isSyncing) return;
+    setIsSyncing(true);
+    try {
+      if (onRefreshStats) {
+        await onRefreshStats();
+      }
+    } finally {
+      setTimeout(() => setIsSyncing(false), 600);
+    }
+  };
   
   // Selected plot state for spatial map
   const [selectedPlot, setSelectedPlot] = useState<{
@@ -123,6 +138,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
 
   // Display Name priority resolution
   const getUserDisplayName = (): string => {
+    if (userProfile?.name) return userProfile.name;
     if (userProfile?.full_name) return userProfile.full_name;
     if (currentUser?.user_metadata?.full_name) return currentUser.user_metadata.full_name;
     if (currentUser?.user_metadata?.name) return currentUser.user_metadata.name;
@@ -382,10 +398,15 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                                         {t('dashboardscreen.start_guided_demo')}
                                       </button>
           )}
-          <div className="flex items-center gap-2 text-xs font-bold bg-white border border-gray-250 px-4 py-2.5 rounded-xl shadow-xs text-gray-650">
-            <Calendar className="w-4 h-4 text-primary" />
-            <span>{t('dashboardscreen.telemetry_online_synced')}</span>
-          </div>
+          <button
+            onClick={handleManualSync}
+            disabled={isSyncing}
+            className="flex items-center gap-2 text-xs font-bold bg-white border border-gray-250 px-4 py-2.5 rounded-xl shadow-xs text-gray-650 hover:border-primary/40 hover:text-primary transition-all duration-200 cursor-pointer disabled:opacity-75"
+            title={t('dashboardscreen.sync_telemetry_hint', 'Click to re-fetch live telemetry and overall stats from Supabase')}
+          >
+            <Calendar className={`w-4 h-4 text-primary ${isSyncing ? "animate-spin" : ""}`} />
+            <span>{isSyncing ? t('dashboardscreen.syncing', 'Syncing Telemetry...') : t('dashboardscreen.telemetry_online_synced')}</span>
+          </button>
         </div>
       </div>
 
@@ -444,7 +465,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <motion.div 
               className="h-full bg-primary" 
               initial={{ width: 0 }}
-              animate={{ width: "72%" }}
+              animate={{ width: `${Math.min(100, Math.max(30, (stats.totalFarmers / 8) * 100))}%` }}
               transition={{ duration: 1.2, ease: "easeOut" }}
             />
           </div>
@@ -473,7 +494,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <motion.div 
               className="h-full bg-emerald-500" 
               initial={{ width: 0 }}
-              animate={{ width: "85%" }}
+              animate={{ width: `${Math.min(100, Math.max(30, (stats.mappedPlots / 10) * 100))}%` }}
               transition={{ duration: 1.2, ease: "easeOut" }}
             />
           </div>
@@ -502,7 +523,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <motion.div 
               className="h-full bg-primary" 
               initial={{ width: 0 }}
-              animate={{ width: "92%" }}
+              animate={{ width: `${Math.min(100, Math.max(30, (stats.activeTwins / 10) * 100))}%` }}
               transition={{ duration: 1.2, ease: "easeOut" }}
             />
           </div>
@@ -531,7 +552,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <motion.div 
               className="h-full bg-indigo-500" 
               initial={{ width: 0 }}
-              animate={{ width: "64%" }}
+              animate={{ width: `${Math.min(100, Math.max(30, ((stats.recommendations || 1) / 5) * 100))}%` }}
               transition={{ duration: 1.2, ease: "easeOut" }}
             />
           </div>
@@ -561,7 +582,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                   fill="transparent"
                   strokeLinecap="round"
                   initial={{ strokeDashoffset: 2 * Math.PI * 20 }}
-                  animate={{ strokeDashoffset: 2 * Math.PI * 20 * (1 - stats.soilHealthScore / 100) }}
+                  animate={{ strokeDashoffset: 2 * Math.PI * 20 * (1 - Math.min(100, Math.max(0, stats.soilHealthScore)) / 100) }}
                   transition={{ duration: 1.5, ease: "easeOut" }}
                   strokeDasharray={2 * Math.PI * 20}
                 />
@@ -573,7 +594,9 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           </div>
           <div className="mt-3">
             <p className="text-[10px] font-bold text-gray-450 uppercase tracking-wider">{t('dashboardscreen.avg_soil_index')}</p>
-            <p className="text-sm font-extrabold text-emerald-700 mt-0.5">{t('dashboardscreen.optimal_range')}</p>
+            <p className="text-sm font-extrabold text-emerald-700 mt-0.5">
+              {stats.soilHealthScore >= 70 ? t('dashboardscreen.optimal_range') : stats.soilHealthScore >= 50 ? t('dashboardscreen.moderate', 'Moderate') : t('dashboardscreen.critical', 'Critical')}
+            </p>
           </div>
         </motion.div>
       </motion.div>

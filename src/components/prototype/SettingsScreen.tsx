@@ -20,6 +20,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ activeSection, o
     role: "Lead Agronomist",
     email: "ramana@samruddhi.org",
     phone: "+91 94401 98765",
+    dob: "",
+    address: "",
     district: "",
     state: "",
     village: "",
@@ -33,6 +35,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ activeSection, o
     fullName: "",
     phoneNumber: "",
     userRole: "Agronomist",
+    dob: "",
+    address: "",
     state: "",
     district: "",
     village: "",
@@ -60,10 +64,12 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ activeSection, o
           }));
         } else if (data) {
           setProfile({
-            name: data.full_name || "",
+            name: data.name || data.full_name || "",
             role: data.user_role || "Agronomist",
             email: data.email || user.email || "",
-            phone: data.phone_number || "",
+            phone: data.phone || data.phone_number || "",
+            dob: data.dob ? String(data.dob).substring(0, 10) : "",
+            address: data.address || "",
             district: data.district || "",
             state: data.state || "",
             village: data.village || "",
@@ -86,6 +92,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ activeSection, o
       fullName: profile.name,
       phoneNumber: profile.phone,
       userRole: profile.role,
+      dob: profile.dob,
+      address: profile.address,
       state: profile.state,
       district: profile.district,
       village: profile.village,
@@ -100,21 +108,37 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ activeSection, o
       const { data: { user }, error: userError } = await supabase.auth.getUser();
       if (userError || !user) throw new Error("No authenticated session found.");
 
-      const { error } = await supabase
-        .from("profiles")
-        .update({
-          full_name: editFields.fullName,
-          phone_number: editFields.phoneNumber,
-          user_role: editFields.userRole,
-          district: editFields.district,
-          state: editFields.state,
-          village: editFields.village,
-          preferred_language: editFields.preferredLanguage,
-          updated_at: new Date()
-        })
-        .eq("id", user.id);
+      let updatePayload: Record<string, any> = {
+        name: editFields.fullName,
+        full_name: editFields.fullName,
+        phone: editFields.phoneNumber,
+        phone_number: editFields.phoneNumber,
+        dob: editFields.dob ? editFields.dob : null,
+        address: editFields.address || null,
+        user_role: editFields.userRole,
+        district: editFields.district,
+        state: editFields.state,
+        village: editFields.village,
+        preferred_language: editFields.preferredLanguage,
+        updated_at: new Date().toISOString()
+      };
 
-      if (error) throw error;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const { error } = await supabase
+          .from("profiles")
+          .update(updatePayload)
+          .eq("id", user.id);
+
+        if (!error) break;
+
+        const missingColMatch = error.message && error.message.match(/Could not find the '([^']+)' column/i);
+        if (missingColMatch && missingColMatch[1]) {
+          delete updatePayload[missingColMatch[1]];
+          continue;
+        }
+
+        throw error;
+      }
 
       // Sync state
       setProfile(prev => ({
@@ -122,6 +146,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ activeSection, o
         name: editFields.fullName,
         role: editFields.userRole,
         phone: editFields.phoneNumber,
+        dob: editFields.dob,
+        address: editFields.address,
         district: editFields.district,
         state: editFields.state,
         village: editFields.village,
@@ -269,6 +295,14 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ activeSection, o
                         <div className="border-b border-gray-100 pb-2">
                           <span className="text-[10px] uppercase font-bold text-gray-400 block tracking-wider">{t('settingsscreen.village_name')}</span>
                           <span className="text-xs font-semibold text-gray-800">{profile.village || t('settingsscreen.not_configured')}</span>
+                        </div>
+                        <div className="border-b border-gray-100 pb-2">
+                          <span className="text-[10px] uppercase font-bold text-gray-400 block tracking-wider">Date of Birth</span>
+                          <span className="text-xs font-semibold text-gray-800">{profile.dob || t('settingsscreen.not_configured', 'Not configured')}</span>
+                        </div>
+                        <div className="border-b border-gray-100 pb-2">
+                          <span className="text-[10px] uppercase font-bold text-gray-400 block tracking-wider">Address</span>
+                          <span className="text-xs font-semibold text-gray-800">{profile.address || t('settingsscreen.not_configured', 'Not configured')}</span>
                         </div>
                         <div className="border-b border-gray-100 pb-2 col-span-1 sm:col-span-2">
                           <span className="text-[10px] uppercase font-bold text-gray-400 block tracking-wider">{t('settingsscreen.preferred_language')}</span>
@@ -584,6 +618,30 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ activeSection, o
                     placeholder={t('settingsscreen.rangampeta')}
                     className="w-full px-3.5 py-2.5 rounded-xl border border-gray-250 bg-gray-50 focus:bg-white text-xs focus:border-primary focus:outline-hidden transition-all"
                   />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-gray-600">Date of Birth</label>
+                    <input
+                      type="date"
+                      max={new Date().toISOString().split("T")[0]}
+                      value={editFields.dob}
+                      onChange={(e) => setEditFields({ ...editFields, dob: e.target.value })}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-gray-250 bg-gray-50 focus:bg-white text-xs focus:border-primary focus:outline-hidden transition-all"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-gray-600">Address / Location</label>
+                    <input
+                      type="text"
+                      value={editFields.address}
+                      onChange={(e) => setEditFields({ ...editFields, address: e.target.value })}
+                      placeholder="Village, District or Region"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-gray-250 bg-gray-50 focus:bg-white text-xs focus:border-primary focus:outline-hidden transition-all"
+                    />
+                  </div>
                 </div>
 
                 <div className="flex justify-end gap-3 pt-4 border-t border-gray-100 mt-6">

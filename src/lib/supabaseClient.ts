@@ -99,7 +99,26 @@ if (isValidUrl(supabaseUrl) && supabaseAnonKey) {
           },
         };
       }
-      return () => Promise.resolve({ data: null, error: new Error('Supabase client not configured.') });
+      if (prop === 'from') {
+        return (_tableName: string) => {
+          const builder: any = {
+            select: () => builder,
+            insert: () => builder,
+            update: () => builder,
+            upsert: () => builder,
+            delete: () => builder,
+            eq: () => builder,
+            neq: () => builder,
+            order: () => builder,
+            limit: () => builder,
+            single: () => Promise.resolve({ data: null, error: null }),
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+            then: (resolve: any) => Promise.resolve({ data: [], error: null }).then(resolve)
+          };
+          return builder;
+        };
+      }
+      return () => Promise.resolve({ data: null, error: null });
     }
   });
 }

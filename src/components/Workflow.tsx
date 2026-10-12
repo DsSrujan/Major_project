@@ -243,14 +243,11 @@ export const Workflow: React.FC = () => {
                   {/* Center Node Orb (Desktop) */}
                   <div className="absolute left-1/2 top-1/2 transform -translate-x-1/2 -translate-y-1/2 hidden md:flex items-center justify-center z-20">
                     <motion.div
-                      className="w-12 h-12 rounded-full border border-gray-200 bg-white shadow-md text-gray-600 flex items-center justify-center"
-                      whileInView={{
-                        scale: [0.8, 1.1, 1],
-                        borderColor: ["#E5E7EB", "#2E7D32"],
-                        color: ["#4B5563", "#2E7D32"]
-                      }}
-                      viewport={{ once: true, margin: "-100px" }}
-                      transition={{ duration: 0.5, delay: 0.1 }}
+                      className="w-12 h-12 rounded-full border-2 border-primary/30 bg-white shadow-md text-primary flex items-center justify-center transition-all group-hover:scale-105"
+                      initial={{ scale: 0.8, opacity: 0 }}
+                      whileInView={{ scale: 1, opacity: 1 }}
+                      viewport={{ once: true, margin: "-80px" }}
+                      transition={{ duration: 0.4 }}
                     >
                       {step.icon}
                     </motion.div>

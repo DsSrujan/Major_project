@@ -42,3 +42,8 @@ test-*.js
 
 # Documentation
 PROJECT_CONTEXT.md
+# WhatsApp Web
+.wwebjs_auth/
+.wwebjs_cache/
+**/.wwebjs_auth/
+**/.wwebjs_cache/

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "whatsapp": "node backend/whatsapp_service/server.js"
   },
   "dependencies": {
     "@geoman-io/leaflet-geoman-free": "^2.20.0",

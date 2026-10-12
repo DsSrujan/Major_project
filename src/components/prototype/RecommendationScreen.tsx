@@ -13,7 +13,7 @@ import { jsPDF } from "jspdf";
 import { DiagnosticExplanationDrawer } from "../analytics/DiagnosticExplanationDrawer";
 import type { DiagnosticItem } from "../analytics/DiagnosticExplanationDrawer";
 import { FloatingAgronomyChat } from "../chat/FloatingAgronomyChat";
-import { explainDiagnosticParameter } from "../../lib/apiClient";
+import { explainDiagnosticParameter, sendRecommendationToWhatsApp } from "../../lib/apiClient";
 import type { DiagnosticExplainResponsePayload } from "../../lib/apiClient";
 import { useEnvironmentalData } from "../../hooks/useEnvironmentalData";
 import { WeatherSmartApplicationAdvisory } from "../analytics/WeatherSmartApplicationAdvisory";
@@ -25,6 +25,7 @@ interface RecommendationScreenProps {
   onClearReport?: () => void;
   showToast?: (message: string, type?: "success" | "info" | "warning") => void;
   farmerName?: string;
+  userProfile?: any;
   onNavigate?: (screen: string) => void;
 }
 
@@ -74,6 +75,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
   onClearReport,
   showToast,
   farmerName,
+  userProfile,
   onNavigate
 }) => {
   const { t } = useTranslation();
@@ -92,6 +94,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
     }
   });
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isSendingWhatsApp, setIsSendingWhatsApp] = useState(false);
 
   // RAG Diagnostic Drawer States
   const [selectedDiagnosticItem, setSelectedDiagnosticItem] = useState<DiagnosticItem | null>(null);
@@ -325,10 +328,10 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
     // 11. Manganese (Mn)
     if (mn !== null) {
       if (mn < 2.0) {
-        issues.push(`Manganese deficiency detected: ${mn} ppm (Target: >2.0 ppm).`);
+        issues.push(`Manganese deficiency detected: ${mn} mg/kg (Target: >2.0 mg/kg).`);
         warningCount++;
       } else {
-        issues.push(`Manganese: Adequate (${mn} ppm). No correction needed.`);
+        issues.push(`Manganese: Adequate (${mn} mg/kg). No correction needed.`);
       }
     }
 
@@ -462,7 +465,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
             sulphur: reportToUse.sulphur || { value: 14.2, unit: "mg/kg", validation: "valid" },
             boron: reportToUse.boron || { value: 0.75, unit: "mg/kg", validation: "valid" },
             iron: reportToUse.iron || { value: 6.4, unit: "mg/kg", validation: "valid" },
-            manganese: reportToUse.manganese || { value: 3.8, unit: "ppm", validation: "valid" },
+            manganese: reportToUse.manganese || { value: 3.8, unit: "mg/kg", validation: "valid" },
             copper: reportToUse.copper || { value: 1.1, unit: "mg/kg", validation: "valid" },
             created_at: reportToUse.created_at
           };
@@ -489,7 +492,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
               sulphur: { value: 14.2, unit: "mg/kg", validation: "valid" },
               boron: { value: 0.75, unit: "mg/kg", validation: "valid" },
               iron: { value: 6.4, unit: "mg/kg", validation: "valid" },
-              manganese: { value: 3.8, unit: "ppm", validation: "valid" },
+              manganese: { value: 3.8, unit: "mg/kg", validation: "valid" },
               copper: { value: 1.1, unit: "mg/kg", validation: "valid" },
             };
             setActiveSoilReport(formatted);
@@ -688,8 +691,8 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       name: "Available Manganese",
       symbol: "Mn",
       value: mnVal,
-      unit: "ppm",
-      targetRange: "> 2.00 ppm",
+      unit: "mg/kg",
+      targetRange: "> 2.00 mg/kg",
       status: !hasSoilReport ? "optimal" : mnVal < 2.00 ? "deficient" : "optimal",
       category: "micro",
     },
@@ -719,8 +722,70 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
         }
       }
       setIsProcessing(false);
-      triggerToast(`AI Recommendation Engine generated fresh results for ${currentPlot?.name || "active plot"}.`, "success");
+      triggerToast(`AI Recommendation Engine generated fresh results for ${currentPlot?.name || "active plot"}. Ready to dispatch to WhatsApp.`, "success");
     }, 800);
+  };
+
+  const handleSendToWhatsApp = async () => {
+    setIsSendingWhatsApp(true);
+    try {
+      const targetPhone = userProfile?.phone || userProfile?.phone_number || "";
+      const farmer = farmerName || userProfile?.name || userProfile?.full_name || currentPlot?.farmer || "Farmer";
+      const plotTitle = currentPlot?.name || "Plot";
+      const cropType = recommendationData?.crop || currentPlot?.crop || "Oil Palm";
+      const severity = recommendationData?.overall_severity || "normal";
+      
+      const soilTelemetry = {
+        nitrogen: nVal,
+        phosphorus: pVal,
+        potassium: kVal,
+        ph: phVal,
+        organicCarbon: ocVal,
+      };
+
+      const result = await sendRecommendationToWhatsApp({
+        phone: targetPhone || undefined,
+        farmer_name: farmer,
+        plot_name: plotTitle,
+        crop: cropType,
+        severity: severity,
+        soil_data: soilTelemetry,
+        fertilizer_plan: recommendationData?.fertilizer_plan || [],
+        advice: recommendationData?.explanation?.summary || undefined,
+        expected_yield: recommendationData?.yield_prediction?.expected_yield_t_ha || undefined,
+      });
+
+      if (result.success) {
+        triggerToast(
+          `Advisory note dispatched to WhatsApp (${result.recipient || targetPhone || "farmer"})!`,
+          "success"
+        );
+      } else {
+        if (result.status === "service_offline") {
+          triggerToast(
+            "WhatsApp service is offline. Please launch via 'npm run whatsapp' in backend terminal.",
+            "warning"
+          );
+        } else if (result.status === "qr_ready" || result.status === "initializing") {
+          triggerToast(
+            "WhatsApp client requires pairing. Scan the QR code displayed in backend terminal.",
+            "warning"
+          );
+        } else if (result.status === "missing_phone") {
+          triggerToast(
+            "No phone number on profile. Please update your profile in Settings to receive WhatsApp advisories.",
+            "warning"
+          );
+        } else {
+          triggerToast(result.error || "Failed to dispatch WhatsApp recommendation note.", "warning");
+        }
+      }
+    } catch (err: any) {
+      console.error("WhatsApp dispatch error:", err);
+      triggerToast(err.message || "Failed to dispatch recommendation to WhatsApp.", "warning");
+    } finally {
+      setIsSendingWhatsApp(false);
+    }
   };
 
   const handleExportPDF = () => {
@@ -889,7 +954,7 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
       drawRow("Sulphur (S)", reportToUse.sulphur, "> 10.0 mg/kg");
       drawRow("Boron (B)", reportToUse.boron, "> 0.50 mg/kg");
       drawRow("Iron (Fe)", reportToUse.iron, "> 4.50 mg/kg");
-      drawRow("Manganese (Mn)", reportToUse.manganese, "> 2.00 ppm");
+      drawRow("Manganese (Mn)", reportToUse.manganese, "> 2.00 mg/kg");
       drawRow("Copper (Cu)", reportToUse.copper, "> 0.20 mg/kg");
       yVal += 5;
 
@@ -1065,6 +1130,22 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
           >
             <Download className="w-4 h-4 text-gray-500" />
             {t('recommendationscreen.export_pdf')}
+          </button>
+
+          <button
+            onClick={handleSendToWhatsApp}
+            disabled={isSendingWhatsApp}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#25D366] hover:bg-[#20bd5a] text-white font-extrabold rounded-xl shadow-md shadow-emerald-600/20 hover:shadow-emerald-600/30 active:scale-95 transition-all text-xs cursor-pointer border-0 h-10 disabled:opacity-60 disabled:cursor-not-allowed"
+            title="Dispatch recommendation summary directly to WhatsApp"
+          >
+            {isSendingWhatsApp ? (
+              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <svg className="w-4 h-4 fill-white shrink-0" viewBox="0 0 24 24">
+                <path d="M12.031 6.172c-3.181 0-5.767 2.586-5.768 5.766-.001 1.298.38 2.27 1.019 3.287l-.582 2.128 2.182-.573c.978.58 1.911.928 3.149.929 3.182 0 5.767-2.587 5.768-5.766.001-3.187-2.575-5.771-5.768-5.771zm3.392 8.244c-.144.405-.837.774-1.17.824-.312.045-.694.062-2.18-.553-1.616-.669-2.656-2.316-2.736-2.424-.079-.107-.655-.873-.655-1.666 0-.793.415-1.183.562-1.344.148-.161.323-.202.431-.202.107 0 .216.002.308.007.098.005.231-.038.361.275.137.33.469 1.144.51 1.228.041.084.068.183.013.293-.055.11-.082.179-.163.275-.081.096-.171.215-.245.289-.082.083-.167.172-.072.336.095.163.423.698.907 1.13.623.555 1.147.728 1.311.81.164.082.261.069.359-.043.098-.112.42-.49.532-.658.113-.168.225-.14.378-.083.153.056.97.458 1.137.541.167.083.278.125.319.194.042.069.042.404-.102.809zM12 2C6.477 2 2 6.477 2 12c0 1.89.525 3.66 1.438 5.168L2 22l4.981-1.306C8.444 21.532 10.174 22 12 22c5.523 0 10-4.477 10-10S17.523 2 12 2z"/>
+              </svg>
+            )}
+            <span>{isSendingWhatsApp ? "Sending..." : "Send to WhatsApp"}</span>
           </button>
 
           <button
@@ -1270,7 +1351,13 @@ export const RecommendationScreen: React.FC<RecommendationScreenProps> = ({
                     </div>
 
                     <div className="pt-1.5 border-t border-gray-200/50 flex items-center justify-between text-[8px] font-bold text-gray-400">
-                      <span>Ideal: {card.targetRange.split(" ")[0]}</span>
+                      <span>
+                        Ideal: {
+                          card.targetRange.startsWith(">")
+                            ? card.targetRange.replace(/\s*(kg\/ha|mg\/kg|dS\/m|ppm|%|pH)\s*$/i, "").trim()
+                            : card.targetRange.split(" ")[0]
+                        }
+                      </span>
                       <span className="text-emerald-700 font-extrabold hover:underline">
                         {!hasSoilReport ? "Baseline Guide →" : "Explain →"}
                       </span>

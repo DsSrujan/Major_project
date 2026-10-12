@@ -345,7 +345,7 @@ export const SoilReportScreen: React.FC<SoilReportScreenProps> = ({
           sulphur: s ?? { value: 14.2, unit: "mg/kg", validation: "valid" },
           boron: b ?? { value: 0.75, unit: "mg/kg", validation: "valid" },
           iron: fe ?? { value: 6.4, unit: "mg/kg", validation: "valid" },
-          manganese: mn ?? { value: 3.8, unit: "ppm", validation: "valid" },
+          manganese: mn ?? { value: 3.8, unit: "mg/kg", validation: "valid" },
           copper: cu ?? { value: 1.1, unit: "mg/kg", validation: "valid" },
         };
 
@@ -362,7 +362,7 @@ export const SoilReportScreen: React.FC<SoilReportScreenProps> = ({
           sulphur: s ?? { value: 14.2, unit: "mg/kg", validation: "valid" },
           boron: b ?? { value: 0.75, unit: "mg/kg", validation: "valid" },
           iron: fe ?? { value: 6.4, unit: "mg/kg", validation: "valid" },
-          manganese: mn ?? { value: 3.8, unit: "ppm", validation: "valid" },
+          manganese: mn ?? { value: 3.8, unit: "mg/kg", validation: "valid" },
           copper: cu ?? { value: 1.1, unit: "mg/kg", validation: "valid" },
           persisted: true
         };
